@@ -135,8 +135,8 @@ public class GhidraMCPPlugin extends Plugin {
 
         server.createContext("/renameData", exchange -> {
             Map<String, String> params = parsePostParams(exchange);
-            renameDataAtAddress(params.get("address"), params.get("newName"));
-            sendResponse(exchange, "Rename data attempted");
+            boolean success = renameDataAtAddress(params.get("address"), params.get("newName"));
+            sendResponse(exchange, success ? "Data renamed successfully" : "Failed to rename data");
         });
 
         server.createContext("/renameVariable", exchange -> {
@@ -227,16 +227,32 @@ public class GhidraMCPPlugin extends Plugin {
             Map<String, String> params = parsePostParams(exchange);
             String address = params.get("address");
             String comment = params.get("comment");
+            if (address == null || address.isEmpty()) {
+                sendResponse(exchange, "Error: address parameter is required");
+                return;
+            }
+            if (comment == null) {
+                sendResponse(exchange, "Error: comment parameter is required");
+                return;
+            }
             boolean success = setDecompilerComment(address, comment);
-            sendResponse(exchange, success ? "Comment set successfully" : "Failed to set comment");
+            sendResponse(exchange, success ? "Comment set successfully at " + address : "Failed to set decompiler comment at " + address);
         });
 
         server.createContext("/set_disassembly_comment", exchange -> {
             Map<String, String> params = parsePostParams(exchange);
             String address = params.get("address");
             String comment = params.get("comment");
+            if (address == null || address.isEmpty()) {
+                sendResponse(exchange, "Error: address parameter is required");
+                return;
+            }
+            if (comment == null) {
+                sendResponse(exchange, "Error: comment parameter is required");
+                return;
+            }
             boolean success = setDisassemblyComment(address, comment);
-            sendResponse(exchange, success ? "Comment set successfully" : "Failed to set comment");
+            sendResponse(exchange, success ? "Comment set successfully at " + address : "Failed to set disassembly comment at " + address);
         });
 
         server.createContext("/rename_function_by_address", exchange -> {
@@ -540,38 +556,58 @@ public class GhidraMCPPlugin extends Plugin {
         return successFlag.get();
     }
 
-    private void renameDataAtAddress(String addressStr, String newName) {
+    private boolean renameDataAtAddress(String addressStr, String newName) {
         Program program = getCurrentProgram();
-        if (program == null) return;
+        if (program == null) {
+            Msg.error(this, "No program loaded for rename data");
+            return false;
+        }
+        if (addressStr == null || addressStr.isEmpty()) {
+            Msg.error(this, "Address is null or empty for rename data");
+            return false;
+        }
+        if (newName == null || newName.isEmpty()) {
+            Msg.error(this, "New name is null or empty for rename data");
+            return false;
+        }
+
+        AtomicBoolean success = new AtomicBoolean(false);
 
         try {
             SwingUtilities.invokeAndWait(() -> {
                 int tx = program.startTransaction("Rename data");
                 try {
                     Address addr = program.getAddressFactory().getAddress(addressStr);
-                    Listing listing = program.getListing();
-                    Data data = listing.getDefinedDataAt(addr);
-                    if (data != null) {
-                        SymbolTable symTable = program.getSymbolTable();
-                        Symbol symbol = symTable.getPrimarySymbol(addr);
-                        if (symbol != null) {
-                            symbol.setName(newName, SourceType.USER_DEFINED);
-                        } else {
-                            symTable.createLabel(addr, newName, SourceType.USER_DEFINED);
-                        }
+                    if (addr == null) {
+                        Msg.error(this, "Failed to parse address for rename data: " + addressStr);
+                        program.endTransaction(tx, false);
+                        return;
+                    }
+
+                    SymbolTable symTable = program.getSymbolTable();
+                    Symbol symbol = symTable.getPrimarySymbol(addr);
+                    if (symbol != null) {
+                        symbol.setName(newName, SourceType.USER_DEFINED);
+                        success.set(true);
+                    } else {
+                        // No existing symbol, create a new label
+                        symTable.createLabel(addr, newName, SourceType.USER_DEFINED);
+                        success.set(true);
                     }
                 }
                 catch (Exception e) {
-                    Msg.error(this, "Rename data error", e);
+                    Msg.error(this, "Rename data error at " + addressStr + ": " + e.getMessage(), e);
                 }
                 finally {
-                    program.endTransaction(tx, true);
+                    program.endTransaction(tx, success.get());
                 }
             });
         }
         catch (InterruptedException | InvocationTargetException e) {
             Msg.error(this, "Failed to execute rename data on Swing thread", e);
         }
+
+        return success.get();
     }
 
     private String renameVariableInFunction(String functionName, String oldVarName, String newVarName) {
@@ -860,8 +896,18 @@ public class GhidraMCPPlugin extends Plugin {
      */
     private boolean setCommentAtAddress(String addressStr, String comment, int commentType, String transactionName) {
         Program program = getCurrentProgram();
-        if (program == null) return false;
-        if (addressStr == null || addressStr.isEmpty() || comment == null) return false;
+        if (program == null) {
+            Msg.error(this, "No program loaded for " + transactionName);
+            return false;
+        }
+        if (addressStr == null || addressStr.isEmpty()) {
+            Msg.error(this, "Address is null or empty for " + transactionName);
+            return false;
+        }
+        if (comment == null) {
+            Msg.error(this, "Comment is null for " + transactionName);
+            return false;
+        }
 
         AtomicBoolean success = new AtomicBoolean(false);
 
@@ -870,12 +916,21 @@ public class GhidraMCPPlugin extends Plugin {
                 int tx = program.startTransaction(transactionName);
                 try {
                     Address addr = program.getAddressFactory().getAddress(addressStr);
+                    if (addr == null) {
+                        Msg.error(this, "Failed to parse address: " + addressStr);
+                        program.endTransaction(tx, false);
+                        return;
+                    }
                     program.getListing().setComment(addr, commentType, comment);
                     success.set(true);
                 } catch (Exception e) {
-                    Msg.error(this, "Error setting " + transactionName.toLowerCase(), e);
+                    Msg.error(this, "Error setting " + transactionName.toLowerCase() + " at " + addressStr + ": " + e.getMessage(), e);
                 } finally {
-                    success.set(program.endTransaction(tx, success.get()));
+                    if (!success.get()) {
+                        program.endTransaction(tx, false);
+                    } else {
+                        program.endTransaction(tx, true);
+                    }
                 }
             });
         } catch (InterruptedException | InvocationTargetException e) {
@@ -1564,7 +1619,8 @@ public class GhidraMCPPlugin extends Plugin {
         String bodyStr = new String(body, StandardCharsets.UTF_8);
         Map<String, String> params = new HashMap<>();
         for (String pair : bodyStr.split("&")) {
-            String[] kv = pair.split("=");
+            // Use limit of 2 to handle values that contain "=" characters
+            String[] kv = pair.split("=", 2);
             if (kv.length == 2) {
                 // URL decode parameter values
                 try {
@@ -1573,6 +1629,14 @@ public class GhidraMCPPlugin extends Plugin {
                     params.put(key, value);
                 } catch (Exception e) {
                     Msg.error(this, "Error decoding URL parameter", e);
+                }
+            } else if (kv.length == 1 && !kv[0].isEmpty()) {
+                // Handle case where parameter has no value (key only)
+                try {
+                    String key = URLDecoder.decode(kv[0], StandardCharsets.UTF_8);
+                    params.put(key, "");
+                } catch (Exception e) {
+                    Msg.error(this, "Error decoding URL parameter key", e);
                 }
             }
         }
