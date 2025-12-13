@@ -72,11 +72,23 @@ def list_classes(offset: int = 0, limit: int = 100) -> list:
     return safe_get("classes", {"offset": offset, "limit": limit})
 
 @mcp.tool()
-def decompile_function(name: str) -> str:
+def decompile_function(name: str, max_lines: int = 200) -> str:
     """
     Decompile a specific function by name and return the decompiled C code.
+
+    Args:
+        name: The function name to decompile
+        max_lines: Maximum number of lines to return (default: 200, 0 for unlimited)
+
+    Returns:
+        Decompiled C code (truncated if exceeds max_lines)
     """
-    return safe_post("decompile", name)
+    result = safe_post("decompile", name)
+    if max_lines > 0:
+        lines = result.split('\n')
+        if len(lines) > max_lines:
+            return '\n'.join(lines[:max_lines]) + f'\n\n... [truncated, showing {max_lines} of {len(lines)} lines]'
+    return result
 
 @mcp.tool()
 def rename_function(old_name: str, new_name: str) -> str:
@@ -169,25 +181,52 @@ def get_current_function() -> str:
     return "\n".join(safe_get("get_current_function"))
 
 @mcp.tool()
-def list_functions() -> list:
+def list_functions(offset: int = 0, limit: int = 100) -> list:
     """
-    List all functions in the database.
+    List all functions in the database with pagination.
+
+    Args:
+        offset: Pagination offset (default: 0)
+        limit: Maximum number of functions to return (default: 100)
+
+    Returns:
+        List of functions with their addresses
     """
-    return safe_get("list_functions")
+    return safe_get("list_functions", {"offset": offset, "limit": limit})
 
 @mcp.tool()
-def decompile_function_by_address(address: str) -> str:
+def decompile_function_by_address(address: str, max_lines: int = 200) -> str:
     """
     Decompile a function at the given address.
+
+    Args:
+        address: Function address in hex format (e.g. "0x1400010a0")
+        max_lines: Maximum number of lines to return (default: 200, 0 for unlimited)
+
+    Returns:
+        Decompiled C code (truncated if exceeds max_lines)
     """
-    return "\n".join(safe_get("decompile_function", {"address": address}))
+    result = "\n".join(safe_get("decompile_function", {"address": address}))
+    if max_lines > 0:
+        lines = result.split('\n')
+        if len(lines) > max_lines:
+            return '\n'.join(lines[:max_lines]) + f'\n\n... [truncated, showing {max_lines} of {len(lines)} lines]'
+    return result
 
 @mcp.tool()
-def disassemble_function(address: str) -> list:
+def disassemble_function(address: str, offset: int = 0, limit: int = 100) -> list:
     """
-    Get assembly code (address: instruction; comment) for a function.
+    Get assembly code (address: instruction; comment) for a function with pagination.
+
+    Args:
+        address: Function address in hex format (e.g. "0x1400010a0")
+        offset: Pagination offset (default: 0)
+        limit: Maximum number of instructions to return (default: 100)
+
+    Returns:
+        List of disassembled instructions
     """
-    return safe_get("disassemble_function", {"address": address})
+    return safe_get("disassemble_function", {"address": address, "offset": offset, "limit": limit})
 
 @mcp.tool()
 def set_decompiler_comment(address: str, comment: str) -> str:
@@ -270,15 +309,15 @@ def get_function_xrefs(name: str, offset: int = 0, limit: int = 100) -> list:
     return safe_get("function_xrefs", {"name": name, "offset": offset, "limit": limit})
 
 @mcp.tool()
-def list_strings(offset: int = 0, limit: int = 2000, filter: str = None) -> list:
+def list_strings(offset: int = 0, limit: int = 100, filter: str = None) -> list:
     """
     List all defined strings in the program with their addresses.
-    
+
     Args:
         offset: Pagination offset (default: 0)
-        limit: Maximum number of strings to return (default: 2000)
+        limit: Maximum number of strings to return (default: 100)
         filter: Optional filter to match within string content
-        
+
     Returns:
         List of strings with their addresses
     """
@@ -286,6 +325,241 @@ def list_strings(offset: int = 0, limit: int = 2000, filter: str = None) -> list
     if filter:
         params["filter"] = filter
     return safe_get("strings", params)
+
+# =============================================================================
+# NEW MCP TOOLS
+# =============================================================================
+
+@mcp.tool()
+def get_program_info() -> str:
+    """
+    Get program metadata and architecture information.
+
+    Returns comprehensive information about the loaded binary including:
+    - Program name and executable path
+    - Language ID (e.g., x86:LE:64:default)
+    - Compiler specification
+    - Processor and endianness
+    - Address size
+    - Executable format (PE, ELF, Mach-O, etc.)
+    - Image base address
+    - Memory size and blocks summary
+    - Function and symbol counts
+    """
+    return "\n".join(safe_get("program_info"))
+
+@mcp.tool()
+def get_function_callees(address: str, offset: int = 0, limit: int = 100) -> list:
+    """
+    Get all functions called by a function (callees/call targets).
+
+    Args:
+        address: Function address in hex format (e.g., "0x1400010a0")
+        offset: Pagination offset (default: 0)
+        limit: Maximum number of results to return (default: 100)
+
+    Returns:
+        List of functions that this function calls
+    """
+    return safe_get("get_callees", {"address": address, "offset": offset, "limit": limit})
+
+@mcp.tool()
+def get_function_callers(address: str, offset: int = 0, limit: int = 100) -> list:
+    """
+    Get all functions that call a function (callers/call sources).
+
+    Args:
+        address: Function address in hex format (e.g., "0x1400010a0")
+        offset: Pagination offset (default: 0)
+        limit: Maximum number of results to return (default: 100)
+
+    Returns:
+        List of functions that call this function
+    """
+    return safe_get("get_callers", {"address": address, "offset": offset, "limit": limit})
+
+@mcp.tool()
+def read_memory(address: str, length: int = 256) -> str:
+    """
+    Read raw memory bytes at a specified address.
+
+    Args:
+        address: Starting address in hex format (e.g., "0x1400010a0")
+        length: Number of bytes to read (default: 256, max: 4096)
+
+    Returns:
+        Hex dump of memory with ASCII representation
+    """
+    return "\n".join(safe_get("read_memory", {"address": address, "length": length}))
+
+@mcp.tool()
+def search_memory(pattern: str, start: str = None, end: str = None, max_results: int = 100) -> str:
+    """
+    Search memory for a byte pattern.
+
+    Args:
+        pattern: Hex string pattern to search for (e.g., "4D5A" for MZ header, "90909090" for NOP sled)
+        start: Optional start address for search range
+        end: Optional end address for search range
+        max_results: Maximum number of matches to return (default: 100)
+
+    Returns:
+        List of addresses where pattern was found, with function context if available
+    """
+    params = {"pattern": pattern, "max_results": max_results}
+    if start:
+        params["start"] = start
+    if end:
+        params["end"] = end
+    return "\n".join(safe_get("search_memory", params))
+
+@mcp.tool()
+def get_basic_blocks(address: str) -> str:
+    """
+    Get basic blocks and control flow information for a function.
+
+    Args:
+        address: Function address in hex format (e.g., "0x1400010a0")
+
+    Returns:
+        List of basic blocks with their start/end addresses, successors, and predecessors.
+        Useful for understanding control flow, identifying loops, and analyzing branches.
+    """
+    return "\n".join(safe_get("get_basic_blocks", {"address": address}))
+
+@mcp.tool()
+def list_data_types(offset: int = 0, limit: int = 100, category: str = None) -> list:
+    """
+    List all data types defined in the program.
+
+    Args:
+        offset: Pagination offset (default: 0)
+        limit: Maximum number of results to return (default: 100)
+        category: Optional category filter (e.g., "windows", "struct")
+
+    Returns:
+        List of data types with their paths, types, and sizes
+    """
+    params = {"offset": offset, "limit": limit}
+    if category:
+        params["category"] = category
+    return safe_get("list_data_types", params)
+
+@mcp.tool()
+def list_structures(offset: int = 0, limit: int = 100) -> list:
+    """
+    List all structures defined in the program.
+
+    Args:
+        offset: Pagination offset (default: 0)
+        limit: Maximum number of results to return (default: 100)
+
+    Returns:
+        List of structures with their sizes and field counts
+    """
+    return safe_get("list_structures", {"offset": offset, "limit": limit})
+
+@mcp.tool()
+def get_structure(name: str) -> str:
+    """
+    Get detailed information about a structure.
+
+    Args:
+        name: Structure name to look up
+
+    Returns:
+        Detailed structure layout including all fields with offsets, sizes, and types
+    """
+    return "\n".join(safe_get("get_structure", {"name": name}))
+
+@mcp.tool()
+def list_equates(offset: int = 0, limit: int = 100) -> list:
+    """
+    List all equates (named constants) in the program.
+
+    Args:
+        offset: Pagination offset (default: 0)
+        limit: Maximum number of results to return (default: 100)
+
+    Returns:
+        List of equates with their names, values, and reference counts
+    """
+    return safe_get("list_equates", {"offset": offset, "limit": limit})
+
+@mcp.tool()
+def create_equate(name: str, value: str, address: str = None, operand_index: str = None) -> str:
+    """
+    Create an equate (named constant) and optionally apply it to an operand.
+
+    Args:
+        name: Name for the equate (e.g., "STATUS_SUCCESS", "SOCKET_ERROR")
+        value: Value as decimal or hex string (e.g., "0" or "0xFFFFFFFF")
+        address: Optional address to apply the equate
+        operand_index: Optional operand index (0, 1, 2...) when applying to an address
+
+    Returns:
+        Confirmation message with equate details
+    """
+    params = {"name": name, "value": value}
+    if address:
+        params["address"] = address
+    if operand_index:
+        params["operand_index"] = operand_index
+    return safe_post("create_equate", params)
+
+@mcp.tool()
+def list_bookmarks(offset: int = 0, limit: int = 100, category: str = None) -> list:
+    """
+    List all bookmarks in the program.
+
+    Args:
+        offset: Pagination offset (default: 0)
+        limit: Maximum number of results to return (default: 100)
+        category: Optional category filter
+
+    Returns:
+        List of bookmarks with their types, categories, addresses, and comments
+    """
+    params = {"offset": offset, "limit": limit}
+    if category:
+        params["category"] = category
+    return safe_get("list_bookmarks", params)
+
+@mcp.tool()
+def create_bookmark(address: str, category: str = "Analysis", description: str = "") -> str:
+    """
+    Create a bookmark at an address.
+
+    Args:
+        address: Address in hex format (e.g., "0x1400010a0")
+        category: Bookmark category (default: "Analysis")
+        description: Bookmark description/comment
+
+    Returns:
+        Confirmation message
+    """
+    return safe_post("create_bookmark", {
+        "address": address,
+        "category": category,
+        "description": description
+    })
+
+@mcp.tool()
+def get_stack_frame(address: str) -> str:
+    """
+    Get stack frame information for a function.
+
+    Args:
+        address: Function address in hex format (e.g., "0x1400010a0")
+
+    Returns:
+        Detailed stack frame information including:
+        - Frame size, local variable size, parameter size
+        - Parameters with storage locations, sizes, types, and names
+        - Local variables with offsets, sizes, types, and names
+        - All stack variables sorted by offset
+    """
+    return "\n".join(safe_get("get_stack_frame", {"address": address}))
 
 def main():
     parser = argparse.ArgumentParser(description="MCP server for Ghidra")

@@ -6,6 +6,13 @@ import ghidra.program.model.address.Address;
 import ghidra.program.model.address.GlobalNamespace;
 import ghidra.program.model.listing.*;
 import ghidra.program.model.mem.MemoryBlock;
+import ghidra.program.model.mem.Memory;
+import ghidra.program.model.mem.MemoryAccessException;
+import ghidra.program.model.block.BasicBlockModel;
+import ghidra.program.model.block.CodeBlock;
+import ghidra.program.model.block.CodeBlockIterator;
+import ghidra.program.model.block.CodeBlockReference;
+import ghidra.program.model.block.CodeBlockReferenceIterator;
 import ghidra.program.model.symbol.*;
 import ghidra.program.model.symbol.ReferenceManager;
 import ghidra.program.model.symbol.Reference;
@@ -208,7 +215,10 @@ public class GhidraMCPPlugin extends Plugin {
         });
 
         server.createContext("/list_functions", exchange -> {
-            sendResponse(exchange, listFunctions());
+            Map<String, String> qparams = parseQueryParams(exchange);
+            int offset = parseIntOrDefault(qparams.get("offset"), 0);
+            int limit = parseIntOrDefault(qparams.get("limit"), 100);
+            sendResponse(exchange, listFunctions(offset, limit));
         });
 
         server.createContext("/decompile_function", exchange -> {
@@ -220,7 +230,9 @@ public class GhidraMCPPlugin extends Plugin {
         server.createContext("/disassemble_function", exchange -> {
             Map<String, String> qparams = parseQueryParams(exchange);
             String address = qparams.get("address");
-            sendResponse(exchange, disassembleFunction(address));
+            int offset = parseIntOrDefault(qparams.get("offset"), 0);
+            int limit = parseIntOrDefault(qparams.get("limit"), 100);
+            sendResponse(exchange, disassembleFunction(address, offset, limit));
         });
 
         server.createContext("/set_decompiler_comment", exchange -> {
@@ -355,6 +367,117 @@ public class GhidraMCPPlugin extends Plugin {
             int limit = parseIntOrDefault(qparams.get("limit"), 100);
             String filter = qparams.get("filter");
             sendResponse(exchange, listDefinedStrings(offset, limit, filter));
+        });
+
+        // === NEW ENDPOINTS ===
+
+        // Program info endpoint
+        server.createContext("/program_info", exchange -> {
+            sendResponse(exchange, getProgramInfo());
+        });
+
+        // Call graph endpoints
+        server.createContext("/get_callees", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            String address = qparams.get("address");
+            int offset = parseIntOrDefault(qparams.get("offset"), 0);
+            int limit = parseIntOrDefault(qparams.get("limit"), 100);
+            sendResponse(exchange, getFunctionCallees(address, offset, limit));
+        });
+
+        server.createContext("/get_callers", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            String address = qparams.get("address");
+            int offset = parseIntOrDefault(qparams.get("offset"), 0);
+            int limit = parseIntOrDefault(qparams.get("limit"), 100);
+            sendResponse(exchange, getFunctionCallers(address, offset, limit));
+        });
+
+        // Memory endpoints
+        server.createContext("/read_memory", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            String address = qparams.get("address");
+            int length = parseIntOrDefault(qparams.get("length"), 256);
+            sendResponse(exchange, readMemory(address, length));
+        });
+
+        server.createContext("/search_memory", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            String hexPattern = qparams.get("pattern");
+            String startAddr = qparams.get("start");
+            String endAddr = qparams.get("end");
+            int maxResults = parseIntOrDefault(qparams.get("max_results"), 100);
+            sendResponse(exchange, searchMemory(hexPattern, startAddr, endAddr, maxResults));
+        });
+
+        // Basic blocks endpoint
+        server.createContext("/get_basic_blocks", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            String address = qparams.get("address");
+            sendResponse(exchange, getBasicBlocks(address));
+        });
+
+        // Data types endpoint
+        server.createContext("/list_data_types", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            int offset = parseIntOrDefault(qparams.get("offset"), 0);
+            int limit = parseIntOrDefault(qparams.get("limit"), 100);
+            String category = qparams.get("category");
+            sendResponse(exchange, listDataTypes(offset, limit, category));
+        });
+
+        server.createContext("/list_structures", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            int offset = parseIntOrDefault(qparams.get("offset"), 0);
+            int limit = parseIntOrDefault(qparams.get("limit"), 100);
+            sendResponse(exchange, listStructures(offset, limit));
+        });
+
+        server.createContext("/get_structure", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            String name = qparams.get("name");
+            sendResponse(exchange, getStructureDetails(name));
+        });
+
+        // Equates endpoints
+        server.createContext("/list_equates", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            int offset = parseIntOrDefault(qparams.get("offset"), 0);
+            int limit = parseIntOrDefault(qparams.get("limit"), 100);
+            sendResponse(exchange, listEquates(offset, limit));
+        });
+
+        server.createContext("/create_equate", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            String name = params.get("name");
+            String valueStr = params.get("value");
+            String addrStr = params.get("address");
+            String opIndexStr = params.get("operand_index");
+            sendResponse(exchange, createEquate(name, valueStr, addrStr, opIndexStr));
+        });
+
+        // Bookmarks endpoints
+        server.createContext("/list_bookmarks", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            int offset = parseIntOrDefault(qparams.get("offset"), 0);
+            int limit = parseIntOrDefault(qparams.get("limit"), 100);
+            String category = qparams.get("category");
+            sendResponse(exchange, listBookmarks(offset, limit, category));
+        });
+
+        server.createContext("/create_bookmark", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            String address = params.get("address");
+            String category = params.get("category");
+            String description = params.get("description");
+            sendResponse(exchange, createBookmark(address, category, description));
+        });
+
+        // Stack frame endpoint
+        server.createContext("/get_stack_frame", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            String address = qparams.get("address");
+            sendResponse(exchange, getStackFrame(address));
         });
 
         server.setExecutor(null);
@@ -799,20 +922,20 @@ public class GhidraMCPPlugin extends Plugin {
     }
 
     /**
-     * List all functions in the database
+     * List all functions in the database with pagination
      */
-    private String listFunctions() {
+    private String listFunctions(int offset, int limit) {
         Program program = getCurrentProgram();
         if (program == null) return "No program loaded";
 
-        StringBuilder result = new StringBuilder();
+        List<String> lines = new ArrayList<>();
         for (Function func : program.getFunctionManager().getFunctions(true)) {
-            result.append(String.format("%s at %s\n", 
-                func.getName(), 
+            lines.add(String.format("%s at %s",
+                func.getName(),
                 func.getEntryPoint()));
         }
 
-        return result.toString();
+        return paginateList(lines, offset, limit);
     }
 
     /**
@@ -853,9 +976,9 @@ public class GhidraMCPPlugin extends Plugin {
     }
 
     /**
-     * Get assembly code for a function
+     * Get assembly code for a function with pagination
      */
-    private String disassembleFunction(String addressStr) {
+    private String disassembleFunction(String addressStr, int offset, int limit) {
         Program program = getCurrentProgram();
         if (program == null) return "No program loaded";
         if (addressStr == null || addressStr.isEmpty()) return "Address is required";
@@ -865,7 +988,7 @@ public class GhidraMCPPlugin extends Plugin {
             Function func = getFunctionForAddress(program, addr);
             if (func == null) return "No function found at or containing address " + addressStr;
 
-            StringBuilder result = new StringBuilder();
+            List<String> lines = new ArrayList<>();
             Listing listing = program.getListing();
             Address start = func.getEntryPoint();
             Address end = func.getBody().getMaxAddress();
@@ -879,13 +1002,13 @@ public class GhidraMCPPlugin extends Plugin {
                 String comment = listing.getComment(CodeUnit.EOL_COMMENT, instr.getAddress());
                 comment = (comment != null) ? "; " + comment : "";
 
-                result.append(String.format("%s: %s %s\n", 
-                    instr.getAddress(), 
+                lines.add(String.format("%s: %s %s",
+                    instr.getAddress(),
                     instr.toString(),
                     comment));
             }
 
-            return result.toString();
+            return paginateList(lines, offset, limit);
         } catch (Exception e) {
             return "Error disassembling function: " + e.getMessage();
         }
@@ -1438,10 +1561,597 @@ public class GhidraMCPPlugin extends Plugin {
      */
     private boolean isStringData(Data data) {
         if (data == null) return false;
-        
+
         DataType dt = data.getDataType();
         String typeName = dt.getName().toLowerCase();
         return typeName.contains("string") || typeName.contains("char") || typeName.equals("unicode");
+    }
+
+    // ===================================================================================
+    // NEW API IMPLEMENTATIONS
+    // ===================================================================================
+
+    /**
+     * Get program metadata and architecture information
+     */
+    private String getProgramInfo() {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("Program Name: ").append(program.getName()).append("\n");
+        sb.append("Language ID: ").append(program.getLanguageID().getIdAsString()).append("\n");
+        sb.append("Compiler Spec: ").append(program.getCompilerSpec().getCompilerSpecID().getIdAsString()).append("\n");
+        sb.append("Processor: ").append(program.getLanguage().getProcessor().toString()).append("\n");
+        sb.append("Endian: ").append(program.getLanguage().isBigEndian() ? "Big" : "Little").append("\n");
+        sb.append("Address Size: ").append(program.getAddressFactory().getDefaultAddressSpace().getSize()).append(" bits\n");
+        sb.append("Executable Format: ").append(program.getExecutableFormat()).append("\n");
+        sb.append("Executable Path: ").append(program.getExecutablePath()).append("\n");
+        sb.append("Image Base: ").append(program.getImageBase()).append("\n");
+        sb.append("Memory Size: ").append(program.getMemory().getSize()).append(" bytes\n");
+        sb.append("Number of Functions: ").append(program.getFunctionManager().getFunctionCount()).append("\n");
+        sb.append("Number of Symbols: ").append(program.getSymbolTable().getNumSymbols()).append("\n");
+        sb.append("Creation Date: ").append(program.getCreationDate()).append("\n");
+
+        // Memory blocks summary
+        sb.append("\nMemory Blocks:\n");
+        for (MemoryBlock block : program.getMemory().getBlocks()) {
+            sb.append(String.format("  %s: %s - %s (%s, %s%s%s)\n",
+                block.getName(),
+                block.getStart(),
+                block.getEnd(),
+                block.isInitialized() ? "initialized" : "uninitialized",
+                block.isRead() ? "R" : "-",
+                block.isWrite() ? "W" : "-",
+                block.isExecute() ? "X" : "-"));
+        }
+
+        return sb.toString();
+    }
+
+    /**
+     * Get functions called by a function (callees)
+     */
+    private String getFunctionCallees(String addressStr, int offset, int limit) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (addressStr == null || addressStr.isEmpty()) return "Address is required";
+
+        try {
+            Address addr = program.getAddressFactory().getAddress(addressStr);
+            Function func = getFunctionForAddress(program, addr);
+            if (func == null) return "No function found at address " + addressStr;
+
+            Set<Function> calledFunctions = func.getCalledFunctions(new ConsoleTaskMonitor());
+            List<String> results = new ArrayList<>();
+
+            for (Function callee : calledFunctions) {
+                results.add(String.format("%s @ %s", callee.getName(), callee.getEntryPoint()));
+            }
+
+            Collections.sort(results);
+            return paginateList(results, offset, limit);
+        } catch (Exception e) {
+            return "Error getting callees: " + e.getMessage();
+        }
+    }
+
+    /**
+     * Get functions that call a function (callers)
+     */
+    private String getFunctionCallers(String addressStr, int offset, int limit) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (addressStr == null || addressStr.isEmpty()) return "Address is required";
+
+        try {
+            Address addr = program.getAddressFactory().getAddress(addressStr);
+            Function func = getFunctionForAddress(program, addr);
+            if (func == null) return "No function found at address " + addressStr;
+
+            Set<Function> callingFunctions = func.getCallingFunctions(new ConsoleTaskMonitor());
+            List<String> results = new ArrayList<>();
+
+            for (Function caller : callingFunctions) {
+                results.add(String.format("%s @ %s", caller.getName(), caller.getEntryPoint()));
+            }
+
+            Collections.sort(results);
+            return paginateList(results, offset, limit);
+        } catch (Exception e) {
+            return "Error getting callers: " + e.getMessage();
+        }
+    }
+
+    /**
+     * Read memory bytes at a specified address
+     */
+    private String readMemory(String addressStr, int length) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (addressStr == null || addressStr.isEmpty()) return "Address is required";
+        if (length <= 0 || length > 4096) length = 256; // Reasonable limits
+
+        try {
+            Address addr = program.getAddressFactory().getAddress(addressStr);
+            Memory memory = program.getMemory();
+
+            byte[] bytes = new byte[length];
+            int bytesRead = memory.getBytes(addr, bytes);
+
+            StringBuilder sb = new StringBuilder();
+            sb.append(String.format("Memory at %s (%d bytes):\n\n", addr, bytesRead));
+
+            // Hex dump format
+            for (int i = 0; i < bytesRead; i += 16) {
+                // Address
+                sb.append(String.format("%s:  ", addr.add(i)));
+
+                // Hex bytes
+                StringBuilder ascii = new StringBuilder();
+                for (int j = 0; j < 16; j++) {
+                    if (i + j < bytesRead) {
+                        byte b = bytes[i + j];
+                        sb.append(String.format("%02x ", b & 0xFF));
+                        ascii.append((b >= 32 && b < 127) ? (char) b : '.');
+                    } else {
+                        sb.append("   ");
+                        ascii.append(" ");
+                    }
+                    if (j == 7) sb.append(" ");
+                }
+
+                // ASCII representation
+                sb.append(" |").append(ascii).append("|\n");
+            }
+
+            return sb.toString();
+        } catch (MemoryAccessException e) {
+            return "Memory access error: " + e.getMessage();
+        } catch (Exception e) {
+            return "Error reading memory: " + e.getMessage();
+        }
+    }
+
+    /**
+     * Search memory for a byte pattern (hex string)
+     */
+    private String searchMemory(String hexPattern, String startAddrStr, String endAddrStr, int maxResults) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (hexPattern == null || hexPattern.isEmpty()) return "Hex pattern is required";
+
+        try {
+            // Parse hex pattern
+            hexPattern = hexPattern.replaceAll("\\s+", ""); // Remove whitespace
+            if (hexPattern.length() % 2 != 0) return "Invalid hex pattern (odd length)";
+
+            byte[] pattern = new byte[hexPattern.length() / 2];
+            for (int i = 0; i < pattern.length; i++) {
+                pattern[i] = (byte) Integer.parseInt(hexPattern.substring(i * 2, i * 2 + 2), 16);
+            }
+
+            Memory memory = program.getMemory();
+            Address startAddr = startAddrStr != null && !startAddrStr.isEmpty()
+                ? program.getAddressFactory().getAddress(startAddrStr)
+                : memory.getMinAddress();
+            Address endAddr = endAddrStr != null && !endAddrStr.isEmpty()
+                ? program.getAddressFactory().getAddress(endAddrStr)
+                : memory.getMaxAddress();
+
+            List<String> results = new ArrayList<>();
+            Address currentAddr = startAddr;
+
+            while (currentAddr != null && currentAddr.compareTo(endAddr) <= 0 && results.size() < maxResults) {
+                Address found = memory.findBytes(currentAddr, endAddr, pattern, null, true, new ConsoleTaskMonitor());
+                if (found == null) break;
+
+                // Get context (function name if available)
+                Function func = program.getFunctionManager().getFunctionContaining(found);
+                String context = func != null ? " in " + func.getName() : "";
+
+                results.add(String.format("%s%s", found, context));
+
+                // Move past this match
+                currentAddr = found.add(1);
+            }
+
+            if (results.isEmpty()) {
+                return "Pattern not found";
+            }
+
+            StringBuilder sb = new StringBuilder();
+            sb.append(String.format("Found %d matches for pattern '%s':\n", results.size(), hexPattern));
+            for (String result : results) {
+                sb.append(result).append("\n");
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            return "Error searching memory: " + e.getMessage();
+        }
+    }
+
+    /**
+     * Get basic blocks for a function
+     */
+    private String getBasicBlocks(String addressStr) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (addressStr == null || addressStr.isEmpty()) return "Address is required";
+
+        try {
+            Address addr = program.getAddressFactory().getAddress(addressStr);
+            Function func = getFunctionForAddress(program, addr);
+            if (func == null) return "No function found at address " + addressStr;
+
+            BasicBlockModel bbModel = new BasicBlockModel(program);
+            CodeBlockIterator blocks = bbModel.getCodeBlocksContaining(func.getBody(), new ConsoleTaskMonitor());
+
+            StringBuilder sb = new StringBuilder();
+            sb.append(String.format("Basic blocks for %s @ %s:\n\n", func.getName(), func.getEntryPoint()));
+
+            int blockNum = 0;
+            while (blocks.hasNext()) {
+                CodeBlock block = blocks.next();
+                blockNum++;
+
+                Address start = block.getFirstStartAddress();
+                Address end = block.getMaxAddress();
+                long size = end.subtract(start) + 1;
+
+                sb.append(String.format("Block %d: %s - %s (size: %d bytes)\n", blockNum, start, end, size));
+
+                // Get destinations (successor blocks)
+                sb.append("  Successors: ");
+                CodeBlockReferenceIterator dests = block.getDestinations(new ConsoleTaskMonitor());
+                List<String> destAddrs = new ArrayList<>();
+                while (dests.hasNext()) {
+                    CodeBlockReference ref = dests.next();
+                    destAddrs.add(ref.getDestinationAddress().toString());
+                }
+                sb.append(destAddrs.isEmpty() ? "(none)" : String.join(", ", destAddrs));
+                sb.append("\n");
+
+                // Get sources (predecessor blocks)
+                sb.append("  Predecessors: ");
+                CodeBlockReferenceIterator sources = block.getSources(new ConsoleTaskMonitor());
+                List<String> srcAddrs = new ArrayList<>();
+                while (sources.hasNext()) {
+                    CodeBlockReference ref = sources.next();
+                    srcAddrs.add(ref.getSourceAddress().toString());
+                }
+                sb.append(srcAddrs.isEmpty() ? "(none)" : String.join(", ", srcAddrs));
+                sb.append("\n\n");
+            }
+
+            sb.append(String.format("Total: %d basic blocks\n", blockNum));
+            return sb.toString();
+        } catch (Exception e) {
+            return "Error getting basic blocks: " + e.getMessage();
+        }
+    }
+
+    /**
+     * List data types in the program
+     */
+    private String listDataTypes(int offset, int limit, String categoryFilter) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+
+        DataTypeManager dtm = program.getDataTypeManager();
+        List<String> results = new ArrayList<>();
+
+        Iterator<DataType> types = dtm.getAllDataTypes();
+        while (types.hasNext()) {
+            DataType dt = types.next();
+            String path = dt.getPathName();
+            String category = dt.getCategoryPath().toString();
+
+            // Filter by category if specified
+            if (categoryFilter != null && !categoryFilter.isEmpty()
+                && !category.toLowerCase().contains(categoryFilter.toLowerCase())) {
+                continue;
+            }
+
+            results.add(String.format("%s (%s, %d bytes)",
+                path, dt.getClass().getSimpleName().replace("DataType", ""), dt.getLength()));
+        }
+
+        Collections.sort(results);
+        return paginateList(results, offset, limit);
+    }
+
+    /**
+     * List structures in the program
+     */
+    private String listStructures(int offset, int limit) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+
+        DataTypeManager dtm = program.getDataTypeManager();
+        List<String> results = new ArrayList<>();
+
+        Iterator<DataType> types = dtm.getAllDataTypes();
+        while (types.hasNext()) {
+            DataType dt = types.next();
+            if (dt instanceof ghidra.program.model.data.Structure) {
+                ghidra.program.model.data.Structure struct = (ghidra.program.model.data.Structure) dt;
+                results.add(String.format("%s (%d bytes, %d fields)",
+                    struct.getPathName(), struct.getLength(), struct.getNumComponents()));
+            }
+        }
+
+        Collections.sort(results);
+        return paginateList(results, offset, limit);
+    }
+
+    /**
+     * Get detailed structure information
+     */
+    private String getStructureDetails(String name) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (name == null || name.isEmpty()) return "Structure name is required";
+
+        DataTypeManager dtm = program.getDataTypeManager();
+        DataType dt = findDataTypeByNameInAllCategories(dtm, name);
+
+        if (dt == null) {
+            return "Structure not found: " + name;
+        }
+
+        if (!(dt instanceof ghidra.program.model.data.Structure)) {
+            return name + " is not a structure (type: " + dt.getClass().getSimpleName() + ")";
+        }
+
+        ghidra.program.model.data.Structure struct = (ghidra.program.model.data.Structure) dt;
+        StringBuilder sb = new StringBuilder();
+        sb.append(String.format("Structure: %s\n", struct.getPathName()));
+        sb.append(String.format("Size: %d bytes\n", struct.getLength()));
+        sb.append(String.format("Alignment: %d\n", struct.getAlignment()));
+        sb.append(String.format("Number of fields: %d\n\n", struct.getNumComponents()));
+
+        sb.append("Fields:\n");
+        sb.append(String.format("%-8s %-8s %-20s %s\n", "Offset", "Size", "Type", "Name"));
+        sb.append("-".repeat(60)).append("\n");
+
+        for (ghidra.program.model.data.DataTypeComponent comp : struct.getComponents()) {
+            String fieldName = comp.getFieldName() != null ? comp.getFieldName() : "(unnamed)";
+            String typeName = comp.getDataType().getName();
+            sb.append(String.format("0x%-6x %-8d %-20s %s\n",
+                comp.getOffset(), comp.getLength(), typeName, fieldName));
+        }
+
+        return sb.toString();
+    }
+
+    /**
+     * List all equates in the program
+     */
+    private String listEquates(int offset, int limit) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+
+        EquateTable equateTable = program.getEquateTable();
+        List<String> results = new ArrayList<>();
+
+        Iterator<Equate> equates = equateTable.getEquates();
+        while (equates.hasNext()) {
+            Equate eq = equates.next();
+            results.add(String.format("%s = 0x%x (%d) [%d references]",
+                eq.getName(), eq.getValue(), eq.getValue(), eq.getReferenceCount()));
+        }
+
+        Collections.sort(results);
+        return paginateList(results, offset, limit);
+    }
+
+    /**
+     * Create an equate (named constant)
+     */
+    private String createEquate(String name, String valueStr, String addressStr, String opIndexStr) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (name == null || name.isEmpty()) return "Equate name is required";
+        if (valueStr == null || valueStr.isEmpty()) return "Equate value is required";
+
+        AtomicBoolean success = new AtomicBoolean(false);
+        StringBuilder result = new StringBuilder();
+
+        try {
+            long value;
+            if (valueStr.startsWith("0x") || valueStr.startsWith("0X")) {
+                value = Long.parseLong(valueStr.substring(2), 16);
+            } else {
+                value = Long.parseLong(valueStr);
+            }
+
+            final long finalValue = value;
+
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Create equate");
+                try {
+                    EquateTable equateTable = program.getEquateTable();
+
+                    // Create or get the equate
+                    Equate equate = equateTable.getEquate(name);
+                    if (equate == null) {
+                        equate = equateTable.createEquate(name, finalValue);
+                        result.append("Created equate: ").append(name).append(" = 0x")
+                              .append(Long.toHexString(finalValue)).append("\n");
+                    } else if (equate.getValue() != finalValue) {
+                        result.append("Equate already exists with different value: ")
+                              .append(equate.getValue()).append("\n");
+                        return;
+                    } else {
+                        result.append("Using existing equate: ").append(name).append("\n");
+                    }
+
+                    // If address and operand index provided, add reference
+                    if (addressStr != null && !addressStr.isEmpty() && opIndexStr != null && !opIndexStr.isEmpty()) {
+                        Address addr = program.getAddressFactory().getAddress(addressStr);
+                        int opIndex = Integer.parseInt(opIndexStr);
+                        equate.addReference(addr, opIndex);
+                        result.append("Added reference at ").append(addr).append(" operand ").append(opIndex);
+                    }
+
+                    success.set(true);
+                } catch (Exception e) {
+                    result.append("Error: ").append(e.getMessage());
+                } finally {
+                    program.endTransaction(tx, success.get());
+                }
+            });
+        } catch (Exception e) {
+            return "Error creating equate: " + e.getMessage();
+        }
+
+        return result.toString();
+    }
+
+    /**
+     * List bookmarks in the program
+     */
+    private String listBookmarks(int offset, int limit, String categoryFilter) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+
+        BookmarkManager bm = program.getBookmarkManager();
+        List<String> results = new ArrayList<>();
+
+        // Get all bookmark types
+        BookmarkType[] types = bm.getBookmarkTypes();
+        for (BookmarkType type : types) {
+            Iterator<Bookmark> bookmarks = bm.getBookmarksIterator(type.getTypeString());
+            while (bookmarks.hasNext()) {
+                Bookmark bookmark = bookmarks.next();
+                String category = bookmark.getCategory();
+
+                // Filter by category if specified
+                if (categoryFilter != null && !categoryFilter.isEmpty()
+                    && !category.toLowerCase().contains(categoryFilter.toLowerCase())) {
+                    continue;
+                }
+
+                results.add(String.format("[%s] %s @ %s: %s",
+                    bookmark.getTypeString(),
+                    category,
+                    bookmark.getAddress(),
+                    bookmark.getComment()));
+            }
+        }
+
+        return paginateList(results, offset, limit);
+    }
+
+    /**
+     * Create a bookmark at an address
+     */
+    private String createBookmark(String addressStr, String category, String description) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (addressStr == null || addressStr.isEmpty()) return "Address is required";
+
+        AtomicBoolean success = new AtomicBoolean(false);
+
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Create bookmark");
+                try {
+                    Address addr = program.getAddressFactory().getAddress(addressStr);
+                    if (addr == null) {
+                        return;
+                    }
+
+                    BookmarkManager bm = program.getBookmarkManager();
+                    String cat = category != null && !category.isEmpty() ? category : "Analysis";
+                    String desc = description != null ? description : "";
+
+                    bm.setBookmark(addr, BookmarkType.NOTE, cat, desc);
+                    success.set(true);
+                } catch (Exception e) {
+                    Msg.error(this, "Error creating bookmark: " + e.getMessage());
+                } finally {
+                    program.endTransaction(tx, success.get());
+                }
+            });
+        } catch (Exception e) {
+            return "Error creating bookmark: " + e.getMessage();
+        }
+
+        return success.get()
+            ? "Bookmark created at " + addressStr
+            : "Failed to create bookmark";
+    }
+
+    /**
+     * Get stack frame information for a function
+     */
+    private String getStackFrame(String addressStr) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (addressStr == null || addressStr.isEmpty()) return "Address is required";
+
+        try {
+            Address addr = program.getAddressFactory().getAddress(addressStr);
+            Function func = getFunctionForAddress(program, addr);
+            if (func == null) return "No function found at address " + addressStr;
+
+            StackFrame frame = func.getStackFrame();
+            StringBuilder sb = new StringBuilder();
+
+            sb.append(String.format("Stack frame for %s @ %s:\n\n", func.getName(), func.getEntryPoint()));
+            sb.append(String.format("Frame Size: %d bytes\n", frame.getFrameSize()));
+            sb.append(String.format("Local Variable Size: %d bytes\n", frame.getLocalSize()));
+            sb.append(String.format("Parameter Size: %d bytes\n", frame.getParameterSize()));
+            sb.append(String.format("Return Address Offset: %d\n", frame.getReturnAddressOffset()));
+
+            // Parameters
+            sb.append("\nParameters:\n");
+            sb.append(String.format("%-12s %-8s %-20s %s\n", "Offset", "Size", "Type", "Name"));
+            sb.append("-".repeat(60)).append("\n");
+
+            Parameter[] params = func.getParameters();
+            for (Parameter param : params) {
+                sb.append(String.format("%-12s %-8d %-20s %s\n",
+                    param.getVariableStorage().toString(),
+                    param.getLength(),
+                    param.getDataType().getName(),
+                    param.getName()));
+            }
+
+            // Local variables
+            sb.append("\nLocal Variables:\n");
+            sb.append(String.format("%-12s %-8s %-20s %s\n", "Offset", "Size", "Type", "Name"));
+            sb.append("-".repeat(60)).append("\n");
+
+            Variable[] locals = frame.getLocals();
+            for (Variable local : locals) {
+                sb.append(String.format("%-12s %-8d %-20s %s\n",
+                    local.getVariableStorage().toString(),
+                    local.getLength(),
+                    local.getDataType().getName(),
+                    local.getName()));
+            }
+
+            // Stack variables (all variables on the stack)
+            sb.append("\nAll Stack Variables:\n");
+            sb.append(String.format("%-12s %-8s %-20s %s\n", "Offset", "Size", "Type", "Name"));
+            sb.append("-".repeat(60)).append("\n");
+
+            Variable[] stackVars = frame.getStackVariables();
+            for (Variable v : stackVars) {
+                sb.append(String.format("%-12d %-8d %-20s %s\n",
+                    v.getStackOffset(),
+                    v.getLength(),
+                    v.getDataType().getName(),
+                    v.getName()));
+            }
+
+            return sb.toString();
+        } catch (Exception e) {
+            return "Error getting stack frame: " + e.getMessage();
+        }
     }
 
     /**
@@ -1645,16 +2355,25 @@ public class GhidraMCPPlugin extends Plugin {
 
     /**
      * Convert a list of strings into one big newline-delimited string, applying offset & limit.
+     * Includes a header line with pagination metadata: total count, offset, and limit.
      */
     private String paginateList(List<String> items, int offset, int limit) {
+        int total = items.size();
         int start = Math.max(0, offset);
-        int end   = Math.min(items.size(), offset + limit);
+        int end   = Math.min(total, offset + limit);
 
-        if (start >= items.size()) {
-            return ""; // no items in range
+        StringBuilder result = new StringBuilder();
+        result.append(String.format("[Showing %d-%d of %d results]",
+            start, Math.min(end, total), total));
+
+        if (start < total) {
+            List<String> sub = items.subList(start, end);
+            for (String item : sub) {
+                result.append("\n").append(item);
+            }
         }
-        List<String> sub = items.subList(start, end);
-        return String.join("\n", sub);
+
+        return result.toString();
     }
 
     /**
