@@ -480,6 +480,109 @@ public class GhidraMCPPlugin extends Plugin {
             sendResponse(exchange, getStackFrame(address));
         });
 
+        // === STRUCTURE MANAGEMENT ENDPOINTS ===
+
+        server.createContext("/create_struct", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            String name = params.get("name");
+            String category = params.get("category");
+            int size = parseIntOrDefault(params.get("size"), 0);
+            sendResponse(exchange, createStruct(name, category, size));
+        });
+
+        server.createContext("/add_struct_member", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            String structName = params.get("struct_name");
+            String category = params.get("category");
+            String fieldName = params.get("field_name");
+            String dataType = params.get("data_type");
+            int offset = parseIntOrDefault(params.get("offset"), -1);
+            String comment = params.get("comment");
+            sendResponse(exchange, addStructMember(structName, category, fieldName, dataType, offset, comment));
+        });
+
+        server.createContext("/remove_struct_member", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            String structName = params.get("struct_name");
+            String category = params.get("category");
+            String fieldName = params.get("field_name");
+            int offset = parseIntOrDefault(params.get("offset"), -1);
+            sendResponse(exchange, removeStructMember(structName, category, fieldName, offset));
+        });
+
+        server.createContext("/clear_struct", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            String structName = params.get("struct_name");
+            String category = params.get("category");
+            sendResponse(exchange, clearStruct(structName, category));
+        });
+
+        // === ENUM MANAGEMENT ENDPOINTS ===
+
+        server.createContext("/create_enum", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            String name = params.get("name");
+            String category = params.get("category");
+            int size = parseIntOrDefault(params.get("size"), 4);
+            sendResponse(exchange, createEnum(name, category, size));
+        });
+
+        server.createContext("/get_enum", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            String name = qparams.get("name");
+            String category = qparams.get("category");
+            sendResponse(exchange, getEnumDetails(name, category));
+        });
+
+        server.createContext("/list_enums", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            int offset = parseIntOrDefault(qparams.get("offset"), 0);
+            int limit = parseIntOrDefault(qparams.get("limit"), 100);
+            sendResponse(exchange, listEnums(offset, limit));
+        });
+
+        server.createContext("/add_enum_value", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            String enumName = params.get("enum_name");
+            String category = params.get("category");
+            String valueName = params.get("value_name");
+            String valueStr = params.get("value");
+            sendResponse(exchange, addEnumValue(enumName, category, valueName, valueStr));
+        });
+
+        server.createContext("/remove_enum_value", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            String enumName = params.get("enum_name");
+            String category = params.get("category");
+            String valueName = params.get("value_name");
+            sendResponse(exchange, removeEnumValue(enumName, category, valueName));
+        });
+
+        // === DATA OPERATIONS ENDPOINTS ===
+
+        server.createContext("/get_data_by_label", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            String label = qparams.get("label");
+            sendResponse(exchange, getDataByLabel(label));
+        });
+
+        server.createContext("/set_data_type", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            String address = params.get("address");
+            String dataType = params.get("data_type");
+            int length = parseIntOrDefault(params.get("length"), -1);
+            sendResponse(exchange, setDataType(address, dataType, length));
+        });
+
+        // === MEMORY WRITE ENDPOINT ===
+
+        server.createContext("/set_bytes", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            String address = params.get("address");
+            String bytesHex = params.get("bytes");
+            sendResponse(exchange, setBytes(address, bytesHex));
+        });
+
         server.setExecutor(null);
         new Thread(() -> {
             try {
@@ -2152,6 +2255,672 @@ public class GhidraMCPPlugin extends Plugin {
         } catch (Exception e) {
             return "Error getting stack frame: " + e.getMessage();
         }
+    }
+
+    // =============================================================================
+    // STRUCTURE MANAGEMENT METHODS
+    // =============================================================================
+
+    /**
+     * Create a new structure data type
+     */
+    private String createStruct(String name, String categoryPath, int size) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (name == null || name.isEmpty()) return "Structure name is required";
+
+        AtomicBoolean success = new AtomicBoolean(false);
+        StringBuilder result = new StringBuilder();
+
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Create structure");
+                try {
+                    DataTypeManager dtm = program.getDataTypeManager();
+
+                    // Determine category
+                    ghidra.program.model.data.Category category;
+                    if (categoryPath != null && !categoryPath.isEmpty()) {
+                        ghidra.program.model.data.CategoryPath catPath =
+                            new ghidra.program.model.data.CategoryPath("/" + categoryPath);
+                        category = dtm.createCategory(catPath);
+                    } else {
+                        category = dtm.getRootCategory();
+                    }
+
+                    // Check if structure already exists
+                    DataType existing = category.getDataType(name);
+                    if (existing != null) {
+                        result.append("Structure already exists: ").append(existing.getPathName());
+                        return;
+                    }
+
+                    // Create the structure
+                    ghidra.program.model.data.StructureDataType struct =
+                        new ghidra.program.model.data.StructureDataType(name, size);
+
+                    DataType added = dtm.addDataType(struct,
+                        ghidra.program.model.data.DataTypeConflictHandler.REPLACE_HANDLER);
+
+                    result.append("Created structure: ").append(added.getPathName());
+                    result.append("\nSize: ").append(added.getLength()).append(" bytes");
+                    success.set(true);
+                } catch (Exception e) {
+                    result.append("Error: ").append(e.getMessage());
+                } finally {
+                    program.endTransaction(tx, success.get());
+                }
+            });
+        } catch (Exception e) {
+            return "Error creating structure: " + e.getMessage();
+        }
+
+        return result.toString();
+    }
+
+    /**
+     * Add a member to an existing structure
+     */
+    private String addStructMember(String structName, String categoryPath, String fieldName,
+                                    String dataTypeName, int offset, String comment) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (structName == null || structName.isEmpty()) return "Structure name is required";
+        if (fieldName == null || fieldName.isEmpty()) return "Field name is required";
+        if (dataTypeName == null || dataTypeName.isEmpty()) return "Data type is required";
+
+        AtomicBoolean success = new AtomicBoolean(false);
+        StringBuilder result = new StringBuilder();
+
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Add struct member");
+                try {
+                    DataTypeManager dtm = program.getDataTypeManager();
+
+                    // Find the structure
+                    DataType dt = findDataTypeByNameInAllCategories(dtm, structName);
+                    if (dt == null) {
+                        result.append("Structure not found: ").append(structName);
+                        return;
+                    }
+                    if (!(dt instanceof ghidra.program.model.data.Structure)) {
+                        result.append(structName).append(" is not a structure");
+                        return;
+                    }
+
+                    ghidra.program.model.data.Structure struct =
+                        (ghidra.program.model.data.Structure) dt;
+
+                    // Find the data type for the field
+                    DataType fieldType = resolveDataType(dtm, dataTypeName);
+                    if (fieldType == null) {
+                        result.append("Data type not found: ").append(dataTypeName);
+                        return;
+                    }
+
+                    // Add the member
+                    ghidra.program.model.data.DataTypeComponent comp;
+                    if (offset >= 0) {
+                        // Add at specific offset
+                        comp = struct.replaceAtOffset(offset, fieldType, fieldType.getLength(),
+                            fieldName, comment);
+                    } else {
+                        // Append to end
+                        comp = struct.add(fieldType, fieldName, comment);
+                    }
+
+                    result.append("Added field '").append(fieldName);
+                    result.append("' (").append(dataTypeName).append(") ");
+                    result.append("at offset 0x").append(Integer.toHexString(comp.getOffset()));
+                    success.set(true);
+                } catch (Exception e) {
+                    result.append("Error: ").append(e.getMessage());
+                } finally {
+                    program.endTransaction(tx, success.get());
+                }
+            });
+        } catch (Exception e) {
+            return "Error adding struct member: " + e.getMessage();
+        }
+
+        return result.toString();
+    }
+
+    /**
+     * Remove a member from a structure
+     */
+    private String removeStructMember(String structName, String categoryPath,
+                                       String fieldName, int offset) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (structName == null || structName.isEmpty()) return "Structure name is required";
+        if (fieldName == null && offset < 0) return "Either field name or offset is required";
+
+        AtomicBoolean success = new AtomicBoolean(false);
+        StringBuilder result = new StringBuilder();
+
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Remove struct member");
+                try {
+                    DataTypeManager dtm = program.getDataTypeManager();
+
+                    DataType dt = findDataTypeByNameInAllCategories(dtm, structName);
+                    if (dt == null) {
+                        result.append("Structure not found: ").append(structName);
+                        return;
+                    }
+                    if (!(dt instanceof ghidra.program.model.data.Structure)) {
+                        result.append(structName).append(" is not a structure");
+                        return;
+                    }
+
+                    ghidra.program.model.data.Structure struct =
+                        (ghidra.program.model.data.Structure) dt;
+
+                    // Find the component to delete
+                    ghidra.program.model.data.DataTypeComponent compToDelete = null;
+
+                    if (offset >= 0) {
+                        compToDelete = struct.getComponentAt(offset);
+                    } else if (fieldName != null) {
+                        for (ghidra.program.model.data.DataTypeComponent comp : struct.getComponents()) {
+                            if (fieldName.equals(comp.getFieldName())) {
+                                compToDelete = comp;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (compToDelete == null) {
+                        result.append("Field not found");
+                        return;
+                    }
+
+                    int ordinal = compToDelete.getOrdinal();
+                    String removedName = compToDelete.getFieldName();
+                    struct.delete(ordinal);
+
+                    result.append("Removed field '").append(removedName);
+                    result.append("' at ordinal ").append(ordinal);
+                    success.set(true);
+                } catch (Exception e) {
+                    result.append("Error: ").append(e.getMessage());
+                } finally {
+                    program.endTransaction(tx, success.get());
+                }
+            });
+        } catch (Exception e) {
+            return "Error removing struct member: " + e.getMessage();
+        }
+
+        return result.toString();
+    }
+
+    /**
+     * Clear all members from a structure
+     */
+    private String clearStruct(String structName, String categoryPath) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (structName == null || structName.isEmpty()) return "Structure name is required";
+
+        AtomicBoolean success = new AtomicBoolean(false);
+        StringBuilder result = new StringBuilder();
+
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Clear structure");
+                try {
+                    DataTypeManager dtm = program.getDataTypeManager();
+
+                    DataType dt = findDataTypeByNameInAllCategories(dtm, structName);
+                    if (dt == null) {
+                        result.append("Structure not found: ").append(structName);
+                        return;
+                    }
+                    if (!(dt instanceof ghidra.program.model.data.Structure)) {
+                        result.append(structName).append(" is not a structure");
+                        return;
+                    }
+
+                    ghidra.program.model.data.Structure struct =
+                        (ghidra.program.model.data.Structure) dt;
+
+                    int numComponents = struct.getNumComponents();
+                    struct.deleteAll();
+
+                    result.append("Cleared ").append(numComponents);
+                    result.append(" fields from ").append(structName);
+                    success.set(true);
+                } catch (Exception e) {
+                    result.append("Error: ").append(e.getMessage());
+                } finally {
+                    program.endTransaction(tx, success.get());
+                }
+            });
+        } catch (Exception e) {
+            return "Error clearing structure: " + e.getMessage();
+        }
+
+        return result.toString();
+    }
+
+    // =============================================================================
+    // ENUM MANAGEMENT METHODS
+    // =============================================================================
+
+    /**
+     * Create a new enum data type
+     */
+    private String createEnum(String name, String categoryPath, int size) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (name == null || name.isEmpty()) return "Enum name is required";
+
+        AtomicBoolean success = new AtomicBoolean(false);
+        StringBuilder result = new StringBuilder();
+
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Create enum");
+                try {
+                    DataTypeManager dtm = program.getDataTypeManager();
+
+                    // Check if enum already exists
+                    DataType existing = findDataTypeByNameInAllCategories(dtm, name);
+                    if (existing != null && existing instanceof ghidra.program.model.data.Enum) {
+                        result.append("Enum already exists: ").append(existing.getPathName());
+                        return;
+                    }
+
+                    // Create the enum
+                    ghidra.program.model.data.EnumDataType enumType =
+                        new ghidra.program.model.data.EnumDataType(name, size);
+
+                    DataType added = dtm.addDataType(enumType,
+                        ghidra.program.model.data.DataTypeConflictHandler.REPLACE_HANDLER);
+
+                    result.append("Created enum: ").append(added.getPathName());
+                    result.append("\nSize: ").append(added.getLength()).append(" bytes");
+                    success.set(true);
+                } catch (Exception e) {
+                    result.append("Error: ").append(e.getMessage());
+                } finally {
+                    program.endTransaction(tx, success.get());
+                }
+            });
+        } catch (Exception e) {
+            return "Error creating enum: " + e.getMessage();
+        }
+
+        return result.toString();
+    }
+
+    /**
+     * Get enum details
+     */
+    private String getEnumDetails(String name, String categoryPath) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (name == null || name.isEmpty()) return "Enum name is required";
+
+        DataTypeManager dtm = program.getDataTypeManager();
+        DataType dt = findDataTypeByNameInAllCategories(dtm, name);
+
+        if (dt == null) {
+            return "Enum not found: " + name;
+        }
+
+        if (!(dt instanceof ghidra.program.model.data.Enum)) {
+            return name + " is not an enum (type: " + dt.getClass().getSimpleName() + ")";
+        }
+
+        ghidra.program.model.data.Enum enumType = (ghidra.program.model.data.Enum) dt;
+        StringBuilder sb = new StringBuilder();
+        sb.append(String.format("Enum: %s\n", enumType.getPathName()));
+        sb.append(String.format("Size: %d bytes\n", enumType.getLength()));
+        sb.append(String.format("Number of values: %d\n\n", enumType.getCount()));
+
+        sb.append("Values:\n");
+        sb.append(String.format("%-30s %s\n", "Name", "Value"));
+        sb.append("-".repeat(50)).append("\n");
+
+        for (String valueName : enumType.getNames()) {
+            long value = enumType.getValue(valueName);
+            sb.append(String.format("%-30s 0x%x (%d)\n", valueName, value, value));
+        }
+
+        return sb.toString();
+    }
+
+    /**
+     * List all enums in the program
+     */
+    private String listEnums(int offset, int limit) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+
+        DataTypeManager dtm = program.getDataTypeManager();
+        List<String> results = new ArrayList<>();
+
+        Iterator<DataType> types = dtm.getAllDataTypes();
+        while (types.hasNext()) {
+            DataType dt = types.next();
+            if (dt instanceof ghidra.program.model.data.Enum) {
+                ghidra.program.model.data.Enum enumType = (ghidra.program.model.data.Enum) dt;
+                results.add(String.format("%s (%d bytes, %d values)",
+                    enumType.getPathName(), enumType.getLength(), enumType.getCount()));
+            }
+        }
+
+        Collections.sort(results);
+        return paginateList(results, offset, limit);
+    }
+
+    /**
+     * Add a value to an existing enum
+     */
+    private String addEnumValue(String enumName, String categoryPath, String valueName, String valueStr) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (enumName == null || enumName.isEmpty()) return "Enum name is required";
+        if (valueName == null || valueName.isEmpty()) return "Value name is required";
+        if (valueStr == null || valueStr.isEmpty()) return "Value is required";
+
+        AtomicBoolean success = new AtomicBoolean(false);
+        StringBuilder result = new StringBuilder();
+
+        try {
+            long value;
+            if (valueStr.startsWith("0x") || valueStr.startsWith("0X")) {
+                value = Long.parseLong(valueStr.substring(2), 16);
+            } else {
+                value = Long.parseLong(valueStr);
+            }
+
+            final long finalValue = value;
+
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Add enum value");
+                try {
+                    DataTypeManager dtm = program.getDataTypeManager();
+
+                    DataType dt = findDataTypeByNameInAllCategories(dtm, enumName);
+                    if (dt == null) {
+                        result.append("Enum not found: ").append(enumName);
+                        return;
+                    }
+                    if (!(dt instanceof ghidra.program.model.data.Enum)) {
+                        result.append(enumName).append(" is not an enum");
+                        return;
+                    }
+
+                    ghidra.program.model.data.Enum enumType = (ghidra.program.model.data.Enum) dt;
+                    enumType.add(valueName, finalValue);
+
+                    result.append("Added '").append(valueName);
+                    result.append("' = 0x").append(Long.toHexString(finalValue));
+                    result.append(" to ").append(enumName);
+                    success.set(true);
+                } catch (Exception e) {
+                    result.append("Error: ").append(e.getMessage());
+                } finally {
+                    program.endTransaction(tx, success.get());
+                }
+            });
+        } catch (Exception e) {
+            return "Error adding enum value: " + e.getMessage();
+        }
+
+        return result.toString();
+    }
+
+    /**
+     * Remove a value from an enum
+     */
+    private String removeEnumValue(String enumName, String categoryPath, String valueName) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (enumName == null || enumName.isEmpty()) return "Enum name is required";
+        if (valueName == null || valueName.isEmpty()) return "Value name is required";
+
+        AtomicBoolean success = new AtomicBoolean(false);
+        StringBuilder result = new StringBuilder();
+
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Remove enum value");
+                try {
+                    DataTypeManager dtm = program.getDataTypeManager();
+
+                    DataType dt = findDataTypeByNameInAllCategories(dtm, enumName);
+                    if (dt == null) {
+                        result.append("Enum not found: ").append(enumName);
+                        return;
+                    }
+                    if (!(dt instanceof ghidra.program.model.data.Enum)) {
+                        result.append(enumName).append(" is not an enum");
+                        return;
+                    }
+
+                    ghidra.program.model.data.Enum enumType = (ghidra.program.model.data.Enum) dt;
+
+                    // Check if value exists
+                    if (!enumType.contains(valueName)) {
+                        result.append("Value '").append(valueName).append("' not found in enum");
+                        return;
+                    }
+
+                    enumType.remove(valueName);
+
+                    result.append("Removed '").append(valueName);
+                    result.append("' from ").append(enumName);
+                    success.set(true);
+                } catch (Exception e) {
+                    result.append("Error: ").append(e.getMessage());
+                } finally {
+                    program.endTransaction(tx, success.get());
+                }
+            });
+        } catch (Exception e) {
+            return "Error removing enum value: " + e.getMessage();
+        }
+
+        return result.toString();
+    }
+
+    // =============================================================================
+    // DATA OPERATIONS METHODS
+    // =============================================================================
+
+    /**
+     * Get data information by label name
+     */
+    private String getDataByLabel(String label) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (label == null || label.isEmpty()) return "Label is required";
+
+        SymbolTable symTable = program.getSymbolTable();
+        List<Symbol> symbols = symTable.getGlobalSymbols(label);
+
+        if (symbols.isEmpty()) {
+            // Try searching for partial matches
+            List<String> partialMatches = new ArrayList<>();
+            SymbolIterator it = symTable.getAllSymbols(true);
+            while (it.hasNext()) {
+                Symbol s = it.next();
+                if (s.getName().toLowerCase().contains(label.toLowerCase())) {
+                    partialMatches.add(s.getName() + " @ " + s.getAddress());
+                    if (partialMatches.size() >= 10) break;
+                }
+            }
+            if (!partialMatches.isEmpty()) {
+                return "Label not found. Did you mean:\n" + String.join("\n", partialMatches);
+            }
+            return "Label not found: " + label;
+        }
+
+        StringBuilder sb = new StringBuilder();
+        for (Symbol sym : symbols) {
+            Address addr = sym.getAddress();
+            sb.append(String.format("Label: %s\n", sym.getName()));
+            sb.append(String.format("Address: %s\n", addr));
+            sb.append(String.format("Namespace: %s\n", sym.getParentNamespace().getName()));
+            sb.append(String.format("Source: %s\n", sym.getSource()));
+
+            // Get data at address if exists
+            Data data = program.getListing().getDataAt(addr);
+            if (data != null) {
+                sb.append(String.format("Data Type: %s\n", data.getDataType().getName()));
+                sb.append(String.format("Size: %d bytes\n", data.getLength()));
+                sb.append(String.format("Value: %s\n", escapeNonAscii(data.getDefaultValueRepresentation())));
+            }
+
+            // Get references to this symbol
+            ReferenceManager refMgr = program.getReferenceManager();
+            ReferenceIterator refIter = refMgr.getReferencesTo(addr);
+            int refCount = 0;
+            while (refIter.hasNext()) {
+                refIter.next();
+                refCount++;
+            }
+            if (refCount > 0) {
+                sb.append(String.format("References: %d\n", refCount));
+            }
+
+            sb.append("\n");
+        }
+
+        return sb.toString();
+    }
+
+    /**
+     * Set data type at an address
+     */
+    private String setDataType(String addressStr, String dataTypeName, int length) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (addressStr == null || addressStr.isEmpty()) return "Address is required";
+        if (dataTypeName == null || dataTypeName.isEmpty()) return "Data type is required";
+
+        AtomicBoolean success = new AtomicBoolean(false);
+        StringBuilder result = new StringBuilder();
+
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Set data type");
+                try {
+                    Address addr = program.getAddressFactory().getAddress(addressStr);
+                    if (addr == null) {
+                        result.append("Invalid address: ").append(addressStr);
+                        return;
+                    }
+
+                    DataTypeManager dtm = program.getDataTypeManager();
+                    DataType dataType = resolveDataType(dtm, dataTypeName);
+                    if (dataType == null) {
+                        result.append("Data type not found: ").append(dataTypeName);
+                        return;
+                    }
+
+                    Listing listing = program.getListing();
+
+                    // Clear any existing data/code at address
+                    listing.clearCodeUnits(addr, addr.add(dataType.getLength() - 1), false);
+
+                    // Create the data
+                    Data data = listing.createData(addr, dataType);
+
+                    result.append("Set data type at ").append(addressStr);
+                    result.append(" to ").append(dataType.getName());
+                    result.append(" (").append(data.getLength()).append(" bytes)");
+                    success.set(true);
+                } catch (Exception e) {
+                    result.append("Error: ").append(e.getMessage());
+                } finally {
+                    program.endTransaction(tx, success.get());
+                }
+            });
+        } catch (Exception e) {
+            return "Error setting data type: " + e.getMessage();
+        }
+
+        return result.toString();
+    }
+
+    // =============================================================================
+    // MEMORY WRITE METHOD
+    // =============================================================================
+
+    /**
+     * Write bytes to memory at specified address
+     */
+    private String setBytes(String addressStr, String bytesHex) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (addressStr == null || addressStr.isEmpty()) return "Address is required";
+        if (bytesHex == null || bytesHex.isEmpty()) return "Bytes are required";
+
+        AtomicBoolean success = new AtomicBoolean(false);
+        StringBuilder result = new StringBuilder();
+
+        try {
+            // Parse hex string to bytes
+            String cleanHex = bytesHex.replaceAll("[^0-9A-Fa-f]", "");
+            if (cleanHex.length() % 2 != 0) {
+                return "Invalid hex string: must have even number of hex digits";
+            }
+
+            byte[] bytes = new byte[cleanHex.length() / 2];
+            for (int i = 0; i < bytes.length; i++) {
+                bytes[i] = (byte) Integer.parseInt(cleanHex.substring(i * 2, i * 2 + 2), 16);
+            }
+
+            final byte[] finalBytes = bytes;
+
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Set bytes");
+                try {
+                    Address addr = program.getAddressFactory().getAddress(addressStr);
+                    if (addr == null) {
+                        result.append("Invalid address: ").append(addressStr);
+                        return;
+                    }
+
+                    Memory memory = program.getMemory();
+                    MemoryBlock block = memory.getBlock(addr);
+
+                    if (block == null) {
+                        result.append("No memory block at address: ").append(addressStr);
+                        return;
+                    }
+
+                    if (!block.isInitialized()) {
+                        result.append("Memory block is not initialized: ").append(block.getName());
+                        return;
+                    }
+
+                    memory.setBytes(addr, finalBytes);
+
+                    result.append("Wrote ").append(finalBytes.length).append(" bytes at ");
+                    result.append(addressStr);
+                    success.set(true);
+                } catch (MemoryAccessException e) {
+                    result.append("Memory access error: ").append(e.getMessage());
+                } catch (Exception e) {
+                    result.append("Error: ").append(e.getMessage());
+                } finally {
+                    program.endTransaction(tx, success.get());
+                }
+            });
+        } catch (Exception e) {
+            return "Error writing bytes: " + e.getMessage();
+        }
+
+        return result.toString();
     }
 
     /**

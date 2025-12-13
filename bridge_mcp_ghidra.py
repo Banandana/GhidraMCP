@@ -561,6 +561,240 @@ def get_stack_frame(address: str) -> str:
     """
     return "\n".join(safe_get("get_stack_frame", {"address": address}))
 
+# =============================================================================
+# STRUCTURE MANAGEMENT TOOLS
+# =============================================================================
+
+@mcp.tool()
+def create_struct(name: str, category: str = None, size: int = 0) -> str:
+    """
+    Create a new structure data type.
+
+    Args:
+        name: Name for the new structure
+        category: Optional category path (e.g., "MyStructures")
+        size: Initial size in bytes (default: 0 for auto-sizing)
+
+    Returns:
+        Confirmation message with structure details
+    """
+    params = {"name": name, "size": str(size)}
+    if category:
+        params["category"] = category
+    return safe_post("create_struct", params)
+
+@mcp.tool()
+def add_struct_member(struct_name: str, field_name: str, data_type: str,
+                      offset: int = -1, category: str = None, comment: str = None) -> str:
+    """
+    Add a member field to an existing structure.
+
+    Args:
+        struct_name: Name of the structure to modify
+        field_name: Name for the new field
+        data_type: Data type for the field (e.g., "int", "DWORD", "char[32]")
+        offset: Byte offset for the field (-1 to append at end)
+        category: Optional category path if structure is in a category
+        comment: Optional comment for the field
+
+    Returns:
+        Confirmation message with field details
+    """
+    params = {
+        "struct_name": struct_name,
+        "field_name": field_name,
+        "data_type": data_type,
+        "offset": str(offset)
+    }
+    if category:
+        params["category"] = category
+    if comment:
+        params["comment"] = comment
+    return safe_post("add_struct_member", params)
+
+@mcp.tool()
+def remove_struct_member(struct_name: str, field_name: str = None,
+                         offset: int = -1, category: str = None) -> str:
+    """
+    Remove a member from a structure.
+
+    Args:
+        struct_name: Name of the structure to modify
+        field_name: Name of the field to remove (optional if offset provided)
+        offset: Byte offset of the field to remove (optional if field_name provided)
+        category: Optional category path if structure is in a category
+
+    Returns:
+        Confirmation message
+    """
+    params = {"struct_name": struct_name, "offset": str(offset)}
+    if field_name:
+        params["field_name"] = field_name
+    if category:
+        params["category"] = category
+    return safe_post("remove_struct_member", params)
+
+@mcp.tool()
+def clear_struct(struct_name: str, category: str = None) -> str:
+    """
+    Remove all members from a structure.
+
+    Args:
+        struct_name: Name of the structure to clear
+        category: Optional category path if structure is in a category
+
+    Returns:
+        Confirmation message with number of fields cleared
+    """
+    params = {"struct_name": struct_name}
+    if category:
+        params["category"] = category
+    return safe_post("clear_struct", params)
+
+# =============================================================================
+# ENUM MANAGEMENT TOOLS
+# =============================================================================
+
+@mcp.tool()
+def create_enum(name: str, size: int = 4, category: str = None) -> str:
+    """
+    Create a new enumeration data type.
+
+    Args:
+        name: Name for the new enum
+        size: Size in bytes (1, 2, 4, or 8; default: 4)
+        category: Optional category path
+
+    Returns:
+        Confirmation message with enum details
+    """
+    params = {"name": name, "size": str(size)}
+    if category:
+        params["category"] = category
+    return safe_post("create_enum", params)
+
+@mcp.tool()
+def get_enum(name: str, category: str = None) -> str:
+    """
+    Get detailed information about an enum.
+
+    Args:
+        name: Enum name to look up
+        category: Optional category path
+
+    Returns:
+        Detailed enum information including all values with their numeric equivalents
+    """
+    params = {"name": name}
+    if category:
+        params["category"] = category
+    return "\n".join(safe_get("get_enum", params))
+
+@mcp.tool()
+def list_enums(offset: int = 0, limit: int = 100) -> list:
+    """
+    List all enumerations defined in the program.
+
+    Args:
+        offset: Pagination offset (default: 0)
+        limit: Maximum number of results to return (default: 100)
+
+    Returns:
+        List of enums with their sizes and value counts
+    """
+    return safe_get("list_enums", {"offset": offset, "limit": limit})
+
+@mcp.tool()
+def add_enum_value(enum_name: str, value_name: str, value: str, category: str = None) -> str:
+    """
+    Add a value to an existing enum.
+
+    Args:
+        enum_name: Name of the enum to modify
+        value_name: Name for the new value (e.g., "STATUS_SUCCESS")
+        value: Numeric value as decimal or hex string (e.g., "0" or "0xFFFFFFFF")
+        category: Optional category path
+
+    Returns:
+        Confirmation message
+    """
+    params = {"enum_name": enum_name, "value_name": value_name, "value": value}
+    if category:
+        params["category"] = category
+    return safe_post("add_enum_value", params)
+
+@mcp.tool()
+def remove_enum_value(enum_name: str, value_name: str, category: str = None) -> str:
+    """
+    Remove a value from an enum.
+
+    Args:
+        enum_name: Name of the enum to modify
+        value_name: Name of the value to remove
+        category: Optional category path
+
+    Returns:
+        Confirmation message
+    """
+    params = {"enum_name": enum_name, "value_name": value_name}
+    if category:
+        params["category"] = category
+    return safe_post("remove_enum_value", params)
+
+# =============================================================================
+# DATA OPERATIONS TOOLS
+# =============================================================================
+
+@mcp.tool()
+def get_data_by_label(label: str) -> str:
+    """
+    Get information about data at a labeled address.
+
+    Args:
+        label: The label/symbol name to look up
+
+    Returns:
+        Data information including address, type, size, value, and reference count.
+        If exact match not found, suggests similar labels.
+    """
+    return "\n".join(safe_get("get_data_by_label", {"label": label}))
+
+@mcp.tool()
+def set_data_type(address: str, data_type: str, length: int = -1) -> str:
+    """
+    Set the data type at a specific address.
+
+    Args:
+        address: Address in hex format (e.g., "0x1400010a0")
+        data_type: Data type to apply (e.g., "int", "DWORD", "char[100]", structure name)
+        length: Optional length for variable-length types
+
+    Returns:
+        Confirmation message with data details
+    """
+    params = {"address": address, "data_type": data_type, "length": str(length)}
+    return safe_post("set_data_type", params)
+
+# =============================================================================
+# MEMORY WRITE TOOL
+# =============================================================================
+
+@mcp.tool()
+def set_bytes(address: str, bytes_hex: str) -> str:
+    """
+    Write bytes to memory at a specified address.
+
+    WARNING: This modifies the binary data. Use with caution.
+
+    Args:
+        address: Starting address in hex format (e.g., "0x1400010a0")
+        bytes_hex: Hex string of bytes to write (e.g., "90909090" for NOPs, "C3" for RET)
+
+    Returns:
+        Confirmation message with number of bytes written
+    """
+    return safe_post("set_bytes", {"address": address, "bytes": bytes_hex})
+
 def main():
     parser = argparse.ArgumentParser(description="MCP server for Ghidra")
     parser.add_argument("--ghidra-server", type=str, default=DEFAULT_GHIDRA_SERVER,
