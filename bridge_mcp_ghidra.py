@@ -23,7 +23,9 @@ mcp = FastMCP("ghidra-mcp")
 # Initialize ghidra_server_url with default value
 ghidra_server_url = DEFAULT_GHIDRA_SERVER
 
-def safe_get(endpoint: str, params: dict = None) -> list:
+DEFAULT_TIMEOUT = 120  # 2 minutes for complex analysis operations
+
+def safe_get(endpoint: str, params: dict = None, timeout: int = DEFAULT_TIMEOUT) -> list:
     """
     Perform a GET request with optional query parameters.
     """
@@ -33,7 +35,7 @@ def safe_get(endpoint: str, params: dict = None) -> list:
     url = urljoin(ghidra_server_url, endpoint)
 
     try:
-        response = requests.get(url, params=params, timeout=5)
+        response = requests.get(url, params=params, timeout=timeout)
         response.encoding = 'utf-8'
         if response.ok:
             return response.text.splitlines()
@@ -42,13 +44,13 @@ def safe_get(endpoint: str, params: dict = None) -> list:
     except Exception as e:
         return [f"Request failed: {str(e)}"]
 
-def safe_post(endpoint: str, data: dict | str) -> str:
+def safe_post(endpoint: str, data: dict | str, timeout: int = DEFAULT_TIMEOUT) -> str:
     try:
         url = urljoin(ghidra_server_url, endpoint)
         if isinstance(data, dict):
-            response = requests.post(url, data=data, timeout=5)
+            response = requests.post(url, data=data, timeout=timeout)
         else:
-            response = requests.post(url, data=data.encode("utf-8"), timeout=5)
+            response = requests.post(url, data=data.encode("utf-8"), timeout=timeout)
         response.encoding = 'utf-8'
         if response.ok:
             return response.text.strip()
@@ -309,13 +311,13 @@ def get_function_xrefs(name: str, offset: int = 0, limit: int = 100) -> list:
     return safe_get("function_xrefs", {"name": name, "offset": offset, "limit": limit})
 
 @mcp.tool()
-def list_strings(offset: int = 0, limit: int = 100, filter: str = None) -> list:
+def list_strings(offset: int = 0, limit: int = 1000, filter: str = None) -> list:
     """
     List all defined strings in the program with their addresses.
 
     Args:
         offset: Pagination offset (default: 0)
-        limit: Maximum number of strings to return (default: 100)
+        limit: Maximum number of strings to return (default: 1000)
         filter: Optional filter to match within string content
 
     Returns:
@@ -760,6 +762,27 @@ def get_data_by_label(label: str) -> str:
     return "\n".join(safe_get("get_data_by_label", {"label": label}))
 
 @mcp.tool()
+def get_data_by_labels(labels: list[str]) -> str:
+    """
+    Get information about data at multiple labeled addresses (batch lookup).
+
+    Args:
+        labels: List of label/symbol names to look up
+            Example: ["g_PlayerInstance", "g_GameState", "g_SaveManager"]
+
+    Returns:
+        Combined data information for all labels, with each result separated.
+        More efficient than calling get_data_by_label multiple times.
+    """
+    results = []
+    for label in labels:
+        results.append(f"=== {label} ===")
+        data = safe_get("get_data_by_label", {"label": label})
+        results.extend(data)
+        results.append("")  # Blank line between results
+    return "\n".join(results)
+
+@mcp.tool()
 def set_data_type(address: str, data_type: str, length: int = -1) -> str:
     """
     Set the data type at a specific address.
@@ -794,6 +817,657 @@ def set_bytes(address: str, bytes_hex: str) -> str:
         Confirmation message with number of bytes written
     """
     return safe_post("set_bytes", {"address": address, "bytes": bytes_hex})
+
+# =============================================================================
+# ADVANCED ANALYSIS TOOLS
+# =============================================================================
+
+@mcp.tool()
+def get_analysis_stats() -> str:
+    """
+    Get comprehensive analysis coverage statistics for the program.
+
+    Returns metrics including:
+    - Total functions and how many are named vs unnamed (FUN_*)
+    - Total data items and how many are named vs unnamed (DAT_*)
+    - String count
+    - Cross-reference density
+    - Overall analysis coverage percentage
+
+    Useful for tracking RE progress and identifying remaining work.
+    """
+    return "\n".join(safe_get("get_analysis_stats"))
+
+@mcp.tool()
+def get_functions_by_xref_count(offset: int = 0, limit: int = 100, min_refs: int = 0) -> list:
+    """
+    Get functions sorted by cross-reference count (most referenced first).
+
+    Args:
+        offset: Pagination offset (default: 0)
+        limit: Maximum number of results (default: 100)
+        min_refs: Minimum reference count filter (default: 0)
+
+    Returns:
+        List of functions with their xref counts, sorted descending.
+        High xref counts often indicate important utility functions.
+    """
+    return safe_get("get_functions_by_xref_count", {
+        "offset": offset, "limit": limit, "min_refs": min_refs
+    })
+
+@mcp.tool()
+def get_unnamed_functions(offset: int = 0, limit: int = 100) -> list:
+    """
+    Get functions that still have default names (FUN_*).
+
+    Args:
+        offset: Pagination offset (default: 0)
+        limit: Maximum number of results (default: 100)
+
+    Returns:
+        List of unnamed functions with their addresses and xref counts.
+        Useful for identifying functions that need analysis.
+    """
+    return safe_get("get_unnamed_functions", {"offset": offset, "limit": limit})
+
+@mcp.tool()
+def get_unnamed_data(offset: int = 0, limit: int = 100) -> list:
+    """
+    Get data items that still have default names (DAT_*).
+
+    Args:
+        offset: Pagination offset (default: 0)
+        limit: Maximum number of results (default: 100)
+
+    Returns:
+        List of unnamed data items with their addresses and types.
+        Useful for identifying global variables that need analysis.
+    """
+    return safe_get("get_unnamed_data", {"offset": offset, "limit": limit})
+
+@mcp.tool()
+def find_functions_with_string(pattern: str, offset: int = 0, limit: int = 100) -> list:
+    """
+    Find all functions that reference strings matching a pattern.
+
+    Args:
+        pattern: Substring to search for in strings (case-insensitive)
+        offset: Pagination offset (default: 0)
+        limit: Maximum number of results (default: 100)
+
+    Returns:
+        List of functions and the matching strings they reference.
+        Combines string search with xref lookup in one operation.
+    """
+    return safe_get("find_functions_with_string", {
+        "pattern": pattern, "offset": offset, "limit": limit
+    })
+
+@mcp.tool()
+def find_functions_calling(target: str, offset: int = 0, limit: int = 100) -> list:
+    """
+    Find all functions that call a specific function (by name or address).
+
+    Args:
+        target: Function name or address (e.g., "malloc" or "0x140001000")
+        offset: Pagination offset (default: 0)
+        limit: Maximum number of results (default: 100)
+
+    Returns:
+        List of calling functions with call site addresses.
+        Works with both named functions and addresses.
+    """
+    return safe_get("find_functions_calling", {
+        "target": target, "offset": offset, "limit": limit
+    })
+
+@mcp.tool()
+def find_vtables(offset: int = 0, limit: int = 100) -> list:
+    """
+    Find potential virtual function tables (vtables) in the binary.
+
+    Searches for common vtable patterns:
+    - Consecutive function pointers in data sections
+    - Pointers within executable segments
+    - RTTI-related structures (if present)
+
+    Args:
+        offset: Pagination offset (default: 0)
+        limit: Maximum number of results (default: 100)
+
+    Returns:
+        List of potential vtable addresses with entry counts.
+        Essential for C++ class recovery.
+    """
+    return safe_get("find_vtables", {"offset": offset, "limit": limit})
+
+@mcp.tool()
+def analyze_vtable(address: str, max_entries: int = 50) -> str:
+    """
+    Analyze a vtable at the given address.
+
+    Args:
+        address: Vtable address in hex format (e.g., "0x140050000")
+        max_entries: Maximum entries to analyze (default: 50)
+
+    Returns:
+        Detailed vtable analysis including:
+        - Each function pointer address
+        - Function names (if known)
+        - Decompiled signatures (if available)
+        - Suggested method names based on position
+
+    Useful for understanding class hierarchies and virtual methods.
+    """
+    return "\n".join(safe_get("analyze_vtable", {
+        "address": address, "max_entries": max_entries
+    }))
+
+@mcp.tool()
+def get_call_tree(address: str, depth: int = 3, direction: str = "both") -> str:
+    """
+    Get a hierarchical call tree for a function.
+
+    Args:
+        address: Function address in hex format (e.g., "0x140001000")
+        depth: How many levels deep to traverse (default: 3, max: 5)
+        direction: "callers", "callees", or "both" (default: "both")
+
+    Returns:
+        Hierarchical tree showing call relationships.
+        Useful for understanding function context and data flow.
+    """
+    return "\n".join(safe_get("get_call_tree", {
+        "address": address, "depth": depth, "direction": direction
+    }))
+
+@mcp.tool()
+def infer_struct_from_function(address: str) -> str:
+    """
+    Infer structure layout from pointer access patterns in a function.
+
+    Analyzes decompiled code to find:
+    - Offsets accessed via pointer arithmetic
+    - Data types used at each offset
+    - Field access patterns
+
+    Args:
+        address: Function address to analyze (e.g., "0x140001000")
+
+    Returns:
+        Inferred structure definition with:
+        - Field offsets
+        - Suggested data types
+        - Access counts
+        - Proposed structure in C format
+
+    Note: This is heuristic-based and may need refinement.
+    """
+    return "\n".join(safe_get("infer_struct_from_function", {"address": address}))
+
+# =============================================================================
+# BATCH OPERATION TOOLS
+# =============================================================================
+
+@mcp.tool()
+def batch_rename_functions(renames: str) -> str:
+    """
+    Rename multiple functions in a single operation.
+
+    Args:
+        renames: JSON array of rename operations, each with:
+            - "address": Function address
+            - "name": New function name
+            Example: '[{"address":"0x140001000","name":"init_player"},{"address":"0x140001100","name":"update_player"}]'
+
+    Returns:
+        Results for each rename operation (success/failure).
+        More efficient than individual rename calls.
+    """
+    return safe_post("batch_rename_functions", {"renames": renames})
+
+@mcp.tool()
+def batch_set_comments(comments: str) -> str:
+    """
+    Set multiple comments in a single operation.
+
+    Args:
+        comments: JSON array of comment operations, each with:
+            - "address": Address for comment
+            - "comment": Comment text
+            - "type": Optional, "decompiler" or "disassembly" (default: "decompiler")
+            Example: '[{"address":"0x140001000","comment":"Initialize player state"},{"address":"0x140001050","comment":"Load config","type":"disassembly"}]'
+
+    Returns:
+        Results for each comment operation.
+    """
+    return safe_post("batch_set_comments", {"comments": comments})
+
+# =============================================================================
+# EXPORT TOOLS (SDK Generation)
+# =============================================================================
+
+@mcp.tool()
+def export_structures_as_c(filter: str = None) -> str:
+    """
+    Export structure definitions as C header format.
+
+    Args:
+        filter: Optional substring filter for structure names
+
+    Returns:
+        C header code with typedef structs for all matching structures.
+        Useful for creating modding SDKs or reimplementations.
+    """
+    params = {}
+    if filter:
+        params["filter"] = filter
+    return "\n".join(safe_get("export_structures_as_c", params))
+
+@mcp.tool()
+def export_enums_as_c(filter: str = None) -> str:
+    """
+    Export enum definitions as C header format.
+
+    Args:
+        filter: Optional substring filter for enum names
+
+    Returns:
+        C header code with enum definitions.
+        Useful for creating modding SDKs or reimplementations.
+    """
+    params = {}
+    if filter:
+        params["filter"] = filter
+    return "\n".join(safe_get("export_enums_as_c", params))
+
+@mcp.tool()
+def export_function_signatures(filter: str = None, offset: int = 0, limit: int = 100) -> str:
+    """
+    Export function signatures as C declarations.
+
+    Args:
+        filter: Optional substring filter for function names
+        offset: Pagination offset (default: 0)
+        limit: Maximum number of functions (default: 100)
+
+    Returns:
+        C function declarations for all matching named functions.
+        Useful for creating header files for reimplementation.
+    """
+    params = {"offset": offset, "limit": limit}
+    if filter:
+        params["filter"] = filter
+    return "\n".join(safe_get("export_function_signatures", params))
+
+# =============================================================================
+# AGENT-OPTIMIZED TOOLS (Combined operations for efficiency)
+# =============================================================================
+
+@mcp.tool()
+def analyze_function(address: str) -> str:
+    """
+    Combined analysis: decompile + xrefs + callees/callers in ONE call.
+
+    This replaces 4-5 separate tool calls with a single efficient operation.
+
+    Args:
+        address: Function address in hex format (e.g., "0x140001000")
+
+    Returns:
+        Combined analysis including:
+        - Function name and whether it's unnamed (FUN_*)
+        - Decompiled code (truncated to 100 lines)
+        - Functions it calls (with unnamed highlighted)
+        - Functions that call it (with unnamed highlighted)
+        - Strings referenced in the function
+
+    Use this as the primary analysis tool - avoids multiple round trips.
+    """
+    results = []
+
+    # Get function info
+    func_info = safe_get("get_function_by_address", {"address": address})
+    results.append("=== FUNCTION INFO ===")
+    results.extend(func_info)
+
+    # Check if unnamed
+    func_name = ""
+    for line in func_info:
+        if line.startswith("Function:"):
+            func_name = line.split()[1] if len(line.split()) > 1 else ""
+            break
+    is_unnamed = func_name.startswith("FUN_")
+    results.append(f"Unnamed: {is_unnamed}")
+    results.append("")
+
+    # Decompile (truncated)
+    results.append("=== DECOMPILED CODE ===")
+    decomp = "\n".join(safe_get("decompile_function", {"address": address}))
+    lines = decomp.split('\n')
+    if len(lines) > 100:
+        results.append('\n'.join(lines[:100]))
+        results.append(f"... [truncated, {len(lines)} total lines]")
+    else:
+        results.append(decomp)
+    results.append("")
+
+    # Get callees (functions this calls)
+    results.append("=== CALLS (functions this calls) ===")
+    callees = safe_get("get_function_callees", {"address": address, "limit": 50})
+    unnamed_callees = []
+    for line in callees:
+        results.append(line)
+        if "FUN_" in line:
+            # Extract address from line like "FUN_140001000 @ 140001000"
+            parts = line.split("@")
+            if len(parts) > 1:
+                unnamed_callees.append(parts[1].strip())
+    results.append(f"\nUnnamed callees: {len(unnamed_callees)}")
+    if unnamed_callees[:5]:
+        results.append(f"First 5: {', '.join(unnamed_callees[:5])}")
+    results.append("")
+
+    # Get callers (functions that call this)
+    results.append("=== CALLED BY (functions that call this) ===")
+    callers = safe_get("get_function_callers", {"address": address, "limit": 50})
+    unnamed_callers = []
+    for line in callers:
+        results.append(line)
+        if "FUN_" in line:
+            parts = line.split("@")
+            if len(parts) > 1:
+                unnamed_callers.append(parts[1].strip())
+    results.append(f"\nUnnamed callers: {len(unnamed_callers)}")
+    if unnamed_callers[:5]:
+        results.append(f"First 5: {', '.join(unnamed_callers[:5])}")
+
+    return "\n".join(results)
+
+
+@mcp.tool()
+def get_next_unnamed(address: str, prefer: str = "callee") -> str:
+    """
+    Get the best next unnamed function to analyze after the current one.
+
+    Prevents aimless enumeration by suggesting a related FUN_* function.
+
+    Args:
+        address: Current function address (just analyzed/renamed)
+        prefer: Strategy for picking next:
+            - "callee": Prefer functions called by current (default, follows data flow)
+            - "caller": Prefer functions that call current (follows control flow up)
+            - "most_refs": Pick the one with most references (important functions)
+
+    Returns:
+        Next unnamed function to analyze with context:
+        - Address and current name
+        - Why it was selected
+        - Brief context (what named functions it relates to)
+
+    Use after renaming a function to maintain focus and avoid enumeration.
+    """
+    results = []
+
+    # Get callees and callers
+    callees = safe_get("get_function_callees", {"address": address, "limit": 30})
+    callers = safe_get("get_function_callers", {"address": address, "limit": 30})
+
+    # Extract unnamed functions
+    unnamed_callees = []
+    unnamed_callers = []
+
+    for line in callees:
+        if "FUN_" in line and "@" in line:
+            parts = line.split("@")
+            name = parts[0].strip()
+            addr = parts[1].strip()
+            unnamed_callees.append({"name": name, "address": addr})
+
+    for line in callers:
+        if "FUN_" in line and "@" in line:
+            parts = line.split("@")
+            name = parts[0].strip()
+            addr = parts[1].strip()
+            unnamed_callers.append({"name": name, "address": addr})
+
+    # Pick based on preference
+    next_func = None
+    reason = ""
+
+    if prefer == "callee" and unnamed_callees:
+        next_func = unnamed_callees[0]
+        reason = f"Called by current function (1 of {len(unnamed_callees)} unnamed callees)"
+    elif prefer == "caller" and unnamed_callers:
+        next_func = unnamed_callers[0]
+        reason = f"Calls current function (1 of {len(unnamed_callers)} unnamed callers)"
+    elif prefer == "most_refs":
+        # Check xref counts for unnamed functions
+        all_unnamed = unnamed_callees + unnamed_callers
+        if all_unnamed:
+            # For simplicity, just pick first one - full implementation would check xref counts
+            next_func = all_unnamed[0]
+            reason = "Selected from related functions"
+
+    # Fallback
+    if not next_func:
+        if unnamed_callees:
+            next_func = unnamed_callees[0]
+            reason = f"Fallback: callee (1 of {len(unnamed_callees)})"
+        elif unnamed_callers:
+            next_func = unnamed_callers[0]
+            reason = f"Fallback: caller (1 of {len(unnamed_callers)})"
+        else:
+            return "No unnamed functions found in callees or callers. Try a different starting point."
+
+    results.append("=== NEXT FUNCTION TO ANALYZE ===")
+    results.append(f"Address: 0x{next_func['address']}")
+    results.append(f"Current name: {next_func['name']}")
+    results.append(f"Reason: {reason}")
+    results.append("")
+    results.append(f"Remaining unnamed callees: {len(unnamed_callees)}")
+    results.append(f"Remaining unnamed callers: {len(unnamed_callers)}")
+    results.append("")
+    results.append("Next step: analyze_function(\"0x" + next_func['address'] + "\")")
+
+    return "\n".join(results)
+
+
+# Track which regions we've visited to ensure diversity
+_visited_regions = set()
+_region_counter = 0
+
+def _get_diverse_unnamed_target() -> dict | None:
+    """
+    Internal helper: pick an unnamed function from a different region.
+    Rotates through: high-xref functions, beginning, middle, end of binary.
+    """
+    global _region_counter
+
+    strategies = [
+        ("high-xref", 0, 10),      # High-value functions by xref count
+        ("early", 0, 50),          # Beginning of binary
+        ("mid-early", 1000, 50),   # ~1000 functions in
+        ("middle", 5000, 50),      # Middle
+        ("mid-late", 10000, 50),   # Later middle
+        ("late", 50000, 50),       # Late in binary
+    ]
+
+    # Rotate through strategies
+    for i in range(len(strategies)):
+        idx = (_region_counter + i) % len(strategies)
+        region_name, offset, limit = strategies[idx]
+
+        # Try high-xref first
+        if region_name == "high-xref":
+            lines = safe_get("get_functions_by_xref_count", {"offset": offset, "limit": limit})
+        else:
+            lines = safe_get("get_unnamed_functions", {"offset": offset, "limit": limit})
+
+        # Find an unnamed function
+        for line in lines:
+            if "FUN_" in line and "@" in line:
+                parts = line.split("@")
+                name = parts[0].strip()
+                addr = parts[1].strip().split()[0]  # Handle "(xrefs: N)" suffix
+
+                # Extract xref count if present
+                xrefs = "?"
+                if "xrefs:" in line:
+                    try:
+                        xrefs = line.split("xrefs:")[1].strip().rstrip(")")
+                    except:
+                        pass
+
+                _region_counter = idx + 1  # Move to next region for next call
+                return {"address": addr, "region": region_name, "xrefs": xrefs}
+
+    return None
+
+
+@mcp.tool()
+def get_diverse_targets(count: int = 5) -> str:
+    """
+    Get unnamed functions from DIFFERENT regions of the binary.
+
+    Returns high-value targets from various address ranges to avoid
+    getting stuck in one area. Use this when local exploration stalls.
+
+    Args:
+        count: Number of diverse targets to return (default: 5)
+
+    Returns:
+        List of unnamed functions from different regions with their addresses.
+    """
+    results = ["=== DIVERSE TARGETS ===", ""]
+
+    # Sample from different offsets
+    regions = [
+        ("High-xref (most called)", "get_functions_by_xref_count", {"offset": 0, "limit": 20}),
+        ("Early binary", "get_unnamed_functions", {"offset": 0, "limit": 20}),
+        ("Mid binary (~5000)", "get_unnamed_functions", {"offset": 5000, "limit": 20}),
+        ("Late binary (~20000)", "get_unnamed_functions", {"offset": 20000, "limit": 20}),
+        ("Very late (~50000)", "get_unnamed_functions", {"offset": 50000, "limit": 20}),
+    ]
+
+    found = 0
+    for region_name, endpoint, params in regions:
+        if found >= count:
+            break
+
+        lines = safe_get(endpoint, params)
+        for line in lines:
+            if found >= count:
+                break
+            if "FUN_" in line and "@" in line:
+                parts = line.split("@")
+                addr = parts[1].strip().split()[0]
+                results.append(f"- 0x{addr} ({region_name})")
+                found += 1
+                break  # One per region
+
+    results.append("")
+    results.append("Pick any address and call: analyze_function(\"0x...\")")
+
+    return "\n".join(results)
+
+
+@mcp.tool()
+def rename_and_next(address: str, new_name: str, comment: str = None) -> str:
+    """
+    Atomic operation: rename function + add comment + get next suggestion.
+
+    Combines 2-3 tool calls into one, and automatically suggests next target.
+
+    Args:
+        address: Function address to rename (e.g., "0x140001000")
+        new_name: New descriptive name for the function
+        comment: Optional decompiler comment explaining the function
+
+    Returns:
+        - Rename confirmation
+        - Comment confirmation (if provided)
+        - Suggested next unnamed function to analyze
+
+    This is the primary "work unit" for the RE agent - rename, document, move on.
+    """
+    results = []
+
+    # Rename
+    results.append("=== RENAME ===")
+    rename_result = safe_post("rename_function_by_address", {
+        "function_address": address,
+        "new_name": new_name
+    })
+    results.append(rename_result)
+    results.append("")
+
+    # Add comment if provided
+    if comment:
+        results.append("=== COMMENT ===")
+        comment_result = safe_post("set_decompiler_comment", {
+            "address": address,
+            "comment": comment
+        })
+        results.append(comment_result)
+        results.append("")
+
+    # Get next suggestion
+    results.append("=== NEXT TARGET ===")
+
+    # Get callees of the newly named function
+    callees = safe_get("get_function_callees", {"address": address, "limit": 20})
+    callers = safe_get("get_function_callers", {"address": address, "limit": 20})
+
+    # Find unnamed
+    next_addr = None
+    for line in callees:
+        if "FUN_" in line and "@" in line:
+            parts = line.split("@")
+            next_addr = parts[1].strip()
+            results.append(f"Suggested: 0x{next_addr} (callee of {new_name})")
+            break
+
+    if not next_addr:
+        for line in callers:
+            if "FUN_" in line and "@" in line:
+                parts = line.split("@")
+                next_addr = parts[1].strip()
+                results.append(f"Suggested: 0x{next_addr} (caller of {new_name})")
+                break
+
+    if not next_addr:
+        # Auto-pick a diverse target instead of giving up
+        results.append("No unnamed in immediate neighborhood - picking diverse target...")
+        diverse = _get_diverse_unnamed_target()
+        if diverse:
+            next_addr = diverse["address"]
+            results.append(f"Suggested: 0x{next_addr} (from {diverse['region']} region, xrefs: {diverse.get('xrefs', '?')})")
+            results.append(f"\nNext: analyze_function(\"0x{next_addr}\")")
+        else:
+            results.append("No unnamed functions found anywhere!")
+    else:
+        results.append(f"\nNext: analyze_function(\"0x{next_addr}\")")
+
+    return "\n".join(results)
+
+
+@mcp.tool()
+def get_naming_progress() -> str:
+    """
+    Get current progress on function naming.
+
+    Returns:
+        - Total functions vs named vs unnamed
+        - Percentage complete
+        - Encouragement to continue
+
+    Use periodically to track progress without reading external files.
+    """
+    stats = safe_get("get_analysis_stats")
+    return "\n".join(stats)
+
 
 def main():
     parser = argparse.ArgumentParser(description="MCP server for Ghidra")

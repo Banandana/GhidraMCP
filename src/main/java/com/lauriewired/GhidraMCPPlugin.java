@@ -64,6 +64,7 @@ import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 @PluginInfo(
     status = PluginStatus.RELEASED,
@@ -581,6 +582,119 @@ public class GhidraMCPPlugin extends Plugin {
             String address = params.get("address");
             String bytesHex = params.get("bytes");
             sendResponse(exchange, setBytes(address, bytesHex));
+        });
+
+        // === ANALYSIS METRICS ENDPOINTS ===
+
+        server.createContext("/get_analysis_stats", exchange -> {
+            sendResponse(exchange, getAnalysisStats());
+        });
+
+        server.createContext("/get_functions_by_xref_count", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            int minXrefs = parseIntOrDefault(qparams.get("min_xrefs"), 1);
+            int offset = parseIntOrDefault(qparams.get("offset"), 0);
+            int limit = parseIntOrDefault(qparams.get("limit"), 50);
+            sendResponse(exchange, getFunctionsByXrefCount(minXrefs, offset, limit));
+        });
+
+        server.createContext("/get_unnamed_functions", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            int offset = parseIntOrDefault(qparams.get("offset"), 0);
+            int limit = parseIntOrDefault(qparams.get("limit"), 100);
+            sendResponse(exchange, getUnnamedFunctions(offset, limit));
+        });
+
+        server.createContext("/get_unnamed_data", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            int offset = parseIntOrDefault(qparams.get("offset"), 0);
+            int limit = parseIntOrDefault(qparams.get("limit"), 100);
+            sendResponse(exchange, getUnnamedData(offset, limit));
+        });
+
+        // === COMBINED SEARCH ENDPOINTS ===
+
+        server.createContext("/find_functions_with_string", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            String searchStr = qparams.get("search");
+            int limit = parseIntOrDefault(qparams.get("limit"), 50);
+            sendResponse(exchange, findFunctionsWithString(searchStr, limit));
+        });
+
+        server.createContext("/find_functions_calling", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            String funcName = qparams.get("name");
+            int limit = parseIntOrDefault(qparams.get("limit"), 50);
+            sendResponse(exchange, findFunctionsCalling(funcName, limit));
+        });
+
+        // === VTABLE & CLASS ANALYSIS ENDPOINTS ===
+
+        server.createContext("/find_vtables", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            int offset = parseIntOrDefault(qparams.get("offset"), 0);
+            int limit = parseIntOrDefault(qparams.get("limit"), 50);
+            sendResponse(exchange, findVtables(offset, limit));
+        });
+
+        server.createContext("/analyze_vtable", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            String address = qparams.get("address");
+            int maxSlots = parseIntOrDefault(qparams.get("max_slots"), 50);
+            sendResponse(exchange, analyzeVtable(address, maxSlots));
+        });
+
+        // === CALL GRAPH ENDPOINTS ===
+
+        server.createContext("/get_call_tree", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            String address = qparams.get("address");
+            int depth = parseIntOrDefault(qparams.get("depth"), 2);
+            String direction = qparams.get("direction");
+            if (direction == null) direction = "callees";
+            sendResponse(exchange, getCallTree(address, depth, direction));
+        });
+
+        // === STRUCTURE INFERENCE ENDPOINT ===
+
+        server.createContext("/infer_struct_from_function", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            String address = qparams.get("address");
+            sendResponse(exchange, inferStructFromFunction(address));
+        });
+
+        // === BATCH OPERATIONS ENDPOINTS ===
+
+        server.createContext("/batch_rename_functions", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            String renamesJson = params.get("renames");
+            sendResponse(exchange, batchRenameFunctions(renamesJson));
+        });
+
+        server.createContext("/batch_set_comments", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            String commentsJson = params.get("comments");
+            sendResponse(exchange, batchSetComments(commentsJson));
+        });
+
+        // === EXPORT ENDPOINTS ===
+
+        server.createContext("/export_structures_as_c", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            String namesParam = qparams.get("names");
+            sendResponse(exchange, exportStructuresAsC(namesParam));
+        });
+
+        server.createContext("/export_enums_as_c", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            String namesParam = qparams.get("names");
+            sendResponse(exchange, exportEnumsAsC(namesParam));
+        });
+
+        server.createContext("/export_function_signatures", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            String addressesParam = qparams.get("addresses");
+            sendResponse(exchange, exportFunctionSignatures(addressesParam));
         });
 
         server.setExecutor(null);
@@ -2849,6 +2963,950 @@ public class GhidraMCPPlugin extends Plugin {
         }
 
         return result.toString();
+    }
+
+    // =============================================================================
+    // ANALYSIS METRICS METHODS
+    // =============================================================================
+
+    /**
+     * Get analysis coverage statistics
+     */
+    private String getAnalysisStats() {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+
+        FunctionManager funcMgr = program.getFunctionManager();
+        SymbolTable symTable = program.getSymbolTable();
+        DataTypeManager dtm = program.getDataTypeManager();
+
+        int totalFunctions = 0;
+        int namedFunctions = 0;
+        int unnamedFunctions = 0;
+
+        FunctionIterator funcIter = funcMgr.getFunctions(true);
+        while (funcIter.hasNext()) {
+            Function func = funcIter.next();
+            totalFunctions++;
+            String name = func.getName();
+            if (name.startsWith("FUN_") || name.startsWith("thunk_FUN_")) {
+                unnamedFunctions++;
+            } else {
+                namedFunctions++;
+            }
+        }
+
+        int totalData = 0;
+        int namedData = 0;
+        int unnamedData = 0;
+
+        SymbolIterator symIter = symTable.getAllSymbols(true);
+        while (symIter.hasNext()) {
+            Symbol sym = symIter.next();
+            if (sym.getSymbolType() == SymbolType.LABEL) {
+                String name = sym.getName();
+                if (name.startsWith("DAT_") || name.startsWith("PTR_") || name.startsWith("ADDR_")) {
+                    unnamedData++;
+                } else {
+                    namedData++;
+                }
+                totalData++;
+            }
+        }
+
+        int structCount = 0;
+        int enumCount = 0;
+        Iterator<DataType> typeIter = dtm.getAllDataTypes();
+        while (typeIter.hasNext()) {
+            DataType dt = typeIter.next();
+            if (dt instanceof ghidra.program.model.data.Structure) {
+                structCount++;
+            } else if (dt instanceof ghidra.program.model.data.Enum) {
+                enumCount++;
+            }
+        }
+
+        double funcPercent = totalFunctions > 0 ? (namedFunctions * 100.0 / totalFunctions) : 0;
+        double dataPercent = totalData > 0 ? (namedData * 100.0 / totalData) : 0;
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("=== Analysis Statistics ===\n\n");
+        sb.append(String.format("Functions:\n"));
+        sb.append(String.format("  Total: %d\n", totalFunctions));
+        sb.append(String.format("  Named: %d (%.1f%%)\n", namedFunctions, funcPercent));
+        sb.append(String.format("  Unnamed (FUN_*): %d\n\n", unnamedFunctions));
+        sb.append(String.format("Data Labels:\n"));
+        sb.append(String.format("  Total: %d\n", totalData));
+        sb.append(String.format("  Named: %d (%.1f%%)\n", namedData, dataPercent));
+        sb.append(String.format("  Unnamed (DAT_*): %d\n\n", unnamedData));
+        sb.append(String.format("Data Types Defined:\n"));
+        sb.append(String.format("  Structures: %d\n", structCount));
+        sb.append(String.format("  Enums: %d\n", enumCount));
+
+        return sb.toString();
+    }
+
+    /**
+     * Get functions sorted by xref count (most referenced first)
+     */
+    private String getFunctionsByXrefCount(int minXrefs, int offset, int limit) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+
+        FunctionManager funcMgr = program.getFunctionManager();
+        ReferenceManager refMgr = program.getReferenceManager();
+
+        List<Map.Entry<Function, Integer>> funcXrefs = new ArrayList<>();
+
+        FunctionIterator funcIter = funcMgr.getFunctions(true);
+        while (funcIter.hasNext()) {
+            Function func = funcIter.next();
+            ReferenceIterator refs = refMgr.getReferencesTo(func.getEntryPoint());
+            int count = 0;
+            while (refs.hasNext()) {
+                refs.next();
+                count++;
+            }
+            if (count >= minXrefs) {
+                funcXrefs.add(new AbstractMap.SimpleEntry<>(func, count));
+            }
+        }
+
+        // Sort by xref count descending
+        funcXrefs.sort((a, b) -> b.getValue().compareTo(a.getValue()));
+
+        List<String> results = new ArrayList<>();
+        for (Map.Entry<Function, Integer> entry : funcXrefs) {
+            Function func = entry.getKey();
+            int count = entry.getValue();
+            results.add(String.format("%s @ %s (xrefs: %d)",
+                func.getName(), func.getEntryPoint(), count));
+        }
+
+        return paginateList(results, offset, limit);
+    }
+
+    /**
+     * Get only unnamed functions (FUN_*)
+     */
+    private String getUnnamedFunctions(int offset, int limit) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+
+        FunctionManager funcMgr = program.getFunctionManager();
+        List<String> results = new ArrayList<>();
+
+        FunctionIterator funcIter = funcMgr.getFunctions(true);
+        while (funcIter.hasNext()) {
+            Function func = funcIter.next();
+            String name = func.getName();
+            if (name.startsWith("FUN_") || name.startsWith("thunk_FUN_")) {
+                results.add(String.format("%s @ %s", name, func.getEntryPoint()));
+            }
+        }
+
+        return paginateList(results, offset, limit);
+    }
+
+    /**
+     * Get only unnamed data (DAT_*)
+     */
+    private String getUnnamedData(int offset, int limit) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+
+        SymbolTable symTable = program.getSymbolTable();
+        List<String> results = new ArrayList<>();
+
+        SymbolIterator symIter = symTable.getAllSymbols(true);
+        while (symIter.hasNext()) {
+            Symbol sym = symIter.next();
+            String name = sym.getName();
+            if (name.startsWith("DAT_") || name.startsWith("PTR_") || name.startsWith("ADDR_")) {
+                results.add(String.format("%s @ %s", name, sym.getAddress()));
+            }
+        }
+
+        return paginateList(results, offset, limit);
+    }
+
+    // =============================================================================
+    // COMBINED SEARCH METHODS
+    // =============================================================================
+
+    /**
+     * Find functions that reference strings containing the search term
+     */
+    private String findFunctionsWithString(String searchStr, int limit) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (searchStr == null || searchStr.isEmpty()) return "Search string required";
+
+        Listing listing = program.getListing();
+        ReferenceManager refMgr = program.getReferenceManager();
+        FunctionManager funcMgr = program.getFunctionManager();
+
+        Set<String> foundFunctions = new LinkedHashSet<>();
+        String searchLower = searchStr.toLowerCase();
+
+        // Find all defined strings
+        DataIterator dataIter = listing.getDefinedData(true);
+        while (dataIter.hasNext() && foundFunctions.size() < limit) {
+            Data data = dataIter.next();
+            if (data.hasStringValue()) {
+                String strValue = data.getDefaultValueRepresentation();
+                if (strValue != null && strValue.toLowerCase().contains(searchLower)) {
+                    // Found matching string, find referencing functions
+                    Address strAddr = data.getAddress();
+                    ReferenceIterator refs = refMgr.getReferencesTo(strAddr);
+                    while (refs.hasNext() && foundFunctions.size() < limit) {
+                        Reference ref = refs.next();
+                        Function func = funcMgr.getFunctionContaining(ref.getFromAddress());
+                        if (func != null) {
+                            String escaped = escapeNonAscii(strValue);
+                            if (escaped.length() > 50) escaped = escaped.substring(0, 47) + "...";
+                            foundFunctions.add(String.format("%s @ %s (refs string: %s)",
+                                func.getName(), func.getEntryPoint(), escaped));
+                        }
+                    }
+                }
+            }
+        }
+
+        if (foundFunctions.isEmpty()) {
+            return "No functions found referencing strings containing: " + searchStr;
+        }
+
+        StringBuilder sb = new StringBuilder();
+        sb.append(String.format("[Found %d functions referencing strings containing '%s']\n",
+            foundFunctions.size(), searchStr));
+        for (String entry : foundFunctions) {
+            sb.append(entry).append("\n");
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Find all functions that call a specific function
+     */
+    private String findFunctionsCalling(String funcName, int limit) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (funcName == null || funcName.isEmpty()) return "Function name required";
+
+        FunctionManager funcMgr = program.getFunctionManager();
+        ReferenceManager refMgr = program.getReferenceManager();
+
+        // Find the target function
+        List<Function> targetFuncs = new ArrayList<>();
+        FunctionIterator funcIter = funcMgr.getFunctions(true);
+        while (funcIter.hasNext()) {
+            Function f = funcIter.next();
+            if (f.getName().toLowerCase().contains(funcName.toLowerCase())) {
+                targetFuncs.add(f);
+            }
+        }
+
+        if (targetFuncs.isEmpty()) {
+            return "Function not found: " + funcName;
+        }
+
+        Set<String> callers = new LinkedHashSet<>();
+        for (Function targetFunc : targetFuncs) {
+            if (callers.size() >= limit) break;
+
+            ReferenceIterator refs = refMgr.getReferencesTo(targetFunc.getEntryPoint());
+            while (refs.hasNext() && callers.size() < limit) {
+                Reference ref = refs.next();
+                if (ref.getReferenceType().isCall()) {
+                    Function callerFunc = funcMgr.getFunctionContaining(ref.getFromAddress());
+                    if (callerFunc != null) {
+                        callers.add(String.format("%s @ %s (calls %s)",
+                            callerFunc.getName(), callerFunc.getEntryPoint(), targetFunc.getName()));
+                    }
+                }
+            }
+        }
+
+        if (callers.isEmpty()) {
+            return "No callers found for: " + funcName;
+        }
+
+        StringBuilder sb = new StringBuilder();
+        sb.append(String.format("[Found %d functions calling '%s']\n", callers.size(), funcName));
+        for (String entry : callers) {
+            sb.append(entry).append("\n");
+        }
+        return sb.toString();
+    }
+
+    // =============================================================================
+    // VTABLE ANALYSIS METHODS
+    // =============================================================================
+
+    /**
+     * Find potential vtables in the binary
+     */
+    private String findVtables(int offset, int limit) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+
+        Listing listing = program.getListing();
+        FunctionManager funcMgr = program.getFunctionManager();
+        int pointerSize = program.getDefaultPointerSize();
+
+        List<String> vtables = new ArrayList<>();
+
+        // Look for arrays of function pointers in data sections
+        DataIterator dataIter = listing.getDefinedData(true);
+        while (dataIter.hasNext()) {
+            Data data = dataIter.next();
+            DataType dt = data.getDataType();
+
+            // Check if it's a pointer
+            if (dt instanceof ghidra.program.model.data.Pointer) {
+                Address addr = data.getAddress();
+                Object value = data.getValue();
+
+                if (value instanceof Address) {
+                    Address targetAddr = (Address) value;
+                    Function func = funcMgr.getFunctionAt(targetAddr);
+
+                    if (func != null) {
+                        // This might be start of a vtable, check consecutive pointers
+                        int consecutiveFuncPtrs = 1;
+                        Address checkAddr = addr.add(pointerSize);
+
+                        for (int i = 0; i < 20; i++) {
+                            Data nextData = listing.getDataAt(checkAddr);
+                            if (nextData == null) break;
+
+                            Object nextValue = nextData.getValue();
+                            if (nextValue instanceof Address) {
+                                Function nextFunc = funcMgr.getFunctionAt((Address) nextValue);
+                                if (nextFunc != null) {
+                                    consecutiveFuncPtrs++;
+                                    checkAddr = checkAddr.add(pointerSize);
+                                } else {
+                                    break;
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+
+                        if (consecutiveFuncPtrs >= 3) {
+                            // Found potential vtable
+                            String label = getSymbolName(program, addr);
+                            vtables.add(String.format("%s @ %s (%d function pointers)",
+                                label, addr, consecutiveFuncPtrs));
+                        }
+                    }
+                }
+            }
+        }
+
+        if (vtables.isEmpty()) {
+            return "No potential vtables found";
+        }
+
+        return paginateList(vtables, offset, limit);
+    }
+
+    private String getSymbolName(Program program, Address addr) {
+        Symbol sym = program.getSymbolTable().getPrimarySymbol(addr);
+        return sym != null ? sym.getName() : addr.toString();
+    }
+
+    /**
+     * Analyze a vtable and list all function slots
+     */
+    private String analyzeVtable(String addressStr, int maxSlots) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (addressStr == null || addressStr.isEmpty()) return "Address required";
+
+        Address addr;
+        try {
+            addr = program.getAddressFactory().getAddress(addressStr);
+        } catch (Exception e) {
+            return "Invalid address: " + addressStr;
+        }
+
+        Listing listing = program.getListing();
+        FunctionManager funcMgr = program.getFunctionManager();
+        int pointerSize = program.getDefaultPointerSize();
+
+        StringBuilder sb = new StringBuilder();
+        sb.append(String.format("=== Vtable Analysis @ %s ===\n\n", addressStr));
+        sb.append(String.format("%-8s %-20s %s\n", "Offset", "Address", "Function"));
+        sb.append("-".repeat(70)).append("\n");
+
+        Address currentAddr = addr;
+        for (int slot = 0; slot < maxSlots; slot++) {
+            Data data = listing.getDataAt(currentAddr);
+            if (data == null) {
+                // Try to read as pointer anyway
+                try {
+                    long ptrValue = 0;
+                    byte[] bytes = new byte[pointerSize];
+                    program.getMemory().getBytes(currentAddr, bytes);
+                    for (int i = pointerSize - 1; i >= 0; i--) {
+                        ptrValue = (ptrValue << 8) | (bytes[i] & 0xFF);
+                    }
+                    Address targetAddr = program.getAddressFactory().getAddress(
+                        String.format("0x%x", ptrValue));
+                    Function func = funcMgr.getFunctionAt(targetAddr);
+                    if (func != null) {
+                        sb.append(String.format("0x%-6x %-20s %s\n",
+                            slot * pointerSize, targetAddr, func.getName()));
+                    } else {
+                        // Not a function pointer, probably end of vtable
+                        break;
+                    }
+                } catch (Exception e) {
+                    break;
+                }
+            } else {
+                Object value = data.getValue();
+                if (value instanceof Address) {
+                    Address targetAddr = (Address) value;
+                    Function func = funcMgr.getFunctionAt(targetAddr);
+                    if (func != null) {
+                        sb.append(String.format("0x%-6x %-20s %s\n",
+                            slot * pointerSize, targetAddr, func.getName()));
+                    } else {
+                        // Not a function pointer, probably end of vtable
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+            currentAddr = currentAddr.add(pointerSize);
+        }
+
+        return sb.toString();
+    }
+
+    // =============================================================================
+    // CALL GRAPH METHODS
+    // =============================================================================
+
+    /**
+     * Get call tree for a function
+     */
+    private String getCallTree(String addressStr, int maxDepth, String direction) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (addressStr == null || addressStr.isEmpty()) return "Address required";
+
+        Address addr;
+        try {
+            addr = program.getAddressFactory().getAddress(addressStr);
+        } catch (Exception e) {
+            return "Invalid address: " + addressStr;
+        }
+
+        FunctionManager funcMgr = program.getFunctionManager();
+        Function rootFunc = funcMgr.getFunctionAt(addr);
+        if (rootFunc == null) {
+            rootFunc = funcMgr.getFunctionContaining(addr);
+        }
+        if (rootFunc == null) {
+            return "No function at address: " + addressStr;
+        }
+
+        StringBuilder sb = new StringBuilder();
+        sb.append(String.format("=== Call Tree: %s @ %s ===\n", rootFunc.getName(), rootFunc.getEntryPoint()));
+        sb.append(String.format("Direction: %s, Max Depth: %d\n\n", direction, maxDepth));
+
+        Set<Address> visited = new HashSet<>();
+        buildCallTree(sb, program, rootFunc, 0, maxDepth, direction, visited);
+
+        return sb.toString();
+    }
+
+    private void buildCallTree(StringBuilder sb, Program program, Function func,
+                               int depth, int maxDepth, String direction, Set<Address> visited) {
+        if (depth > maxDepth || visited.contains(func.getEntryPoint())) {
+            return;
+        }
+        visited.add(func.getEntryPoint());
+
+        String indent = "  ".repeat(depth);
+        sb.append(String.format("%s%s%s @ %s\n",
+            indent, depth > 0 ? "├─ " : "", func.getName(), func.getEntryPoint()));
+
+        if (depth >= maxDepth) return;
+
+        FunctionManager funcMgr = program.getFunctionManager();
+        ReferenceManager refMgr = program.getReferenceManager();
+
+        Set<Function> related = new LinkedHashSet<>();
+
+        if (direction.equals("callees") || direction.equals("both")) {
+            // Get functions this calls
+            Set<Function> callees = func.getCalledFunctions(null);
+            related.addAll(callees);
+        }
+
+        if (direction.equals("callers") || direction.equals("both")) {
+            // Get functions that call this
+            ReferenceIterator refs = refMgr.getReferencesTo(func.getEntryPoint());
+            while (refs.hasNext()) {
+                Reference ref = refs.next();
+                if (ref.getReferenceType().isCall()) {
+                    Function caller = funcMgr.getFunctionContaining(ref.getFromAddress());
+                    if (caller != null) {
+                        related.add(caller);
+                    }
+                }
+            }
+        }
+
+        int count = 0;
+        for (Function relatedFunc : related) {
+            if (count >= 10) {
+                sb.append(String.format("%s  └─ ... and %d more\n", indent, related.size() - count));
+                break;
+            }
+            buildCallTree(sb, program, relatedFunc, depth + 1, maxDepth, direction, visited);
+            count++;
+        }
+    }
+
+    // =============================================================================
+    // STRUCTURE INFERENCE METHOD
+    // =============================================================================
+
+    /**
+     * Infer structure layout from function decompilation
+     */
+    private String inferStructFromFunction(String addressStr) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (addressStr == null || addressStr.isEmpty()) return "Address required";
+
+        Address addr;
+        try {
+            addr = program.getAddressFactory().getAddress(addressStr);
+        } catch (Exception e) {
+            return "Invalid address: " + addressStr;
+        }
+
+        FunctionManager funcMgr = program.getFunctionManager();
+        Function func = funcMgr.getFunctionAt(addr);
+        if (func == null) {
+            func = funcMgr.getFunctionContaining(addr);
+        }
+        if (func == null) {
+            return "No function at address: " + addressStr;
+        }
+
+        // Use decompiler to analyze
+        DecompInterface decomp = new DecompInterface();
+        decomp.openProgram(program);
+
+        try {
+            DecompileResults results = decomp.decompileFunction(func, 30, null);
+            if (!results.decompileCompleted()) {
+                return "Decompilation failed";
+            }
+
+            HighFunction highFunc = results.getHighFunction();
+            if (highFunc == null) {
+                return "No high-level function available";
+            }
+
+            // Analyze parameter access patterns
+            Map<Integer, String> fieldAccesses = new TreeMap<>();
+            int pointerSize = program.getDefaultPointerSize();
+
+            // Look for pointer + offset patterns in the decompiled code
+            String decompCode = results.getDecompiledFunction().getC();
+
+            // Simple regex-like pattern matching for offset access
+            // Looking for patterns like *(param + 0x10) or param->field
+            java.util.regex.Pattern pattern = java.util.regex.Pattern.compile(
+                "\\*?\\([^)]+\\s*\\+\\s*(0x[0-9a-fA-F]+|\\d+)\\)"
+            );
+            java.util.regex.Matcher matcher = pattern.matcher(decompCode);
+
+            while (matcher.find()) {
+                String offsetStr = matcher.group(1);
+                try {
+                    int offset;
+                    if (offsetStr.startsWith("0x")) {
+                        offset = Integer.parseInt(offsetStr.substring(2), 16);
+                    } else {
+                        offset = Integer.parseInt(offsetStr);
+                    }
+                    fieldAccesses.put(offset, guessTypeFromOffset(offset, pointerSize));
+                } catch (NumberFormatException e) {
+                    // Skip invalid
+                }
+            }
+
+            if (fieldAccesses.isEmpty()) {
+                return "No clear structure access patterns found in function";
+            }
+
+            StringBuilder sb = new StringBuilder();
+            sb.append(String.format("=== Inferred Structure from %s ===\n\n", func.getName()));
+            sb.append("Suggested structure definition:\n\n");
+            sb.append("```c\n");
+            sb.append("struct InferredStruct {\n");
+
+            int lastOffset = 0;
+            for (Map.Entry<Integer, String> entry : fieldAccesses.entrySet()) {
+                int offset = entry.getKey();
+                String type = entry.getValue();
+
+                // Add padding if there's a gap
+                if (offset > lastOffset) {
+                    int gap = offset - lastOffset;
+                    if (gap > 0 && gap <= 64) {
+                        sb.append(String.format("    char _pad_0x%x[%d];\n", lastOffset, gap));
+                    }
+                }
+
+                sb.append(String.format("    %s field_0x%x;  // offset 0x%x\n", type, offset, offset));
+                lastOffset = offset + getSizeForType(type, pointerSize);
+            }
+
+            sb.append("};\n");
+            sb.append("```\n\n");
+
+            sb.append("To create this structure:\n");
+            sb.append("```\n");
+            sb.append("create_struct(\"InferredStruct\", size=0)\n");
+            for (Map.Entry<Integer, String> entry : fieldAccesses.entrySet()) {
+                sb.append(String.format("add_struct_member(\"InferredStruct\", \"field_0x%x\", \"%s\", offset=0x%x)\n",
+                    entry.getKey(), entry.getValue(), entry.getKey()));
+            }
+            sb.append("```\n");
+
+            return sb.toString();
+        } finally {
+            decomp.dispose();
+        }
+    }
+
+    private String guessTypeFromOffset(int offset, int pointerSize) {
+        // Simple heuristic based on offset alignment
+        if (offset % pointerSize == 0) {
+            return "void*";  // Could be pointer
+        } else if (offset % 4 == 0) {
+            return "int";
+        } else if (offset % 2 == 0) {
+            return "short";
+        }
+        return "char";
+    }
+
+    private int getSizeForType(String type, int pointerSize) {
+        if (type.contains("*")) return pointerSize;
+        if (type.equals("int") || type.equals("uint") || type.equals("float")) return 4;
+        if (type.equals("short") || type.equals("ushort")) return 2;
+        if (type.equals("long") || type.equals("double")) return 8;
+        return 1;
+    }
+
+    // =============================================================================
+    // BATCH OPERATIONS METHODS
+    // =============================================================================
+
+    /**
+     * Batch rename multiple functions
+     */
+    private String batchRenameFunctions(String renamesJson) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (renamesJson == null || renamesJson.isEmpty()) return "Renames JSON required";
+
+        AtomicInteger successCount = new AtomicInteger(0);
+        AtomicInteger failCount = new AtomicInteger(0);
+        StringBuilder errors = new StringBuilder();
+
+        try {
+            // Simple JSON parsing (format: [{"address":"0x...","name":"..."},...]
+            // Remove brackets and split by },
+            String cleaned = renamesJson.trim();
+            if (cleaned.startsWith("[")) cleaned = cleaned.substring(1);
+            if (cleaned.endsWith("]")) cleaned = cleaned.substring(0, cleaned.length() - 1);
+
+            String[] entries = cleaned.split("\\},\\s*\\{");
+
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Batch rename functions");
+                try {
+                    FunctionManager funcMgr = program.getFunctionManager();
+
+                    for (String entry : entries) {
+                        entry = entry.replace("{", "").replace("}", "");
+                        String address = null;
+                        String name = null;
+
+                        for (String pair : entry.split(",")) {
+                            pair = pair.trim();
+                            if (pair.startsWith("\"address\"")) {
+                                address = pair.split(":")[1].trim().replace("\"", "");
+                            } else if (pair.startsWith("\"name\"")) {
+                                name = pair.split(":")[1].trim().replace("\"", "");
+                            }
+                        }
+
+                        if (address != null && name != null) {
+                            try {
+                                Address addr = program.getAddressFactory().getAddress(address);
+                                Function func = funcMgr.getFunctionAt(addr);
+                                if (func == null) {
+                                    func = funcMgr.getFunctionContaining(addr);
+                                }
+                                if (func != null) {
+                                    func.setName(name, SourceType.USER_DEFINED);
+                                    successCount.incrementAndGet();
+                                } else {
+                                    errors.append("No function at ").append(address).append("\n");
+                                    failCount.incrementAndGet();
+                                }
+                            } catch (Exception e) {
+                                errors.append("Error renaming ").append(address).append(": ")
+                                      .append(e.getMessage()).append("\n");
+                                failCount.incrementAndGet();
+                            }
+                        }
+                    }
+                } finally {
+                    program.endTransaction(tx, successCount.get() > 0);
+                }
+            });
+        } catch (Exception e) {
+            return "Error processing batch rename: " + e.getMessage();
+        }
+
+        StringBuilder result = new StringBuilder();
+        result.append(String.format("Batch rename complete: %d succeeded, %d failed\n",
+            successCount.get(), failCount.get()));
+        if (errors.length() > 0) {
+            result.append("\nErrors:\n").append(errors);
+        }
+        return result.toString();
+    }
+
+    /**
+     * Batch set multiple comments
+     */
+    private String batchSetComments(String commentsJson) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (commentsJson == null || commentsJson.isEmpty()) return "Comments JSON required";
+
+        AtomicInteger successCount = new AtomicInteger(0);
+        AtomicInteger failCount = new AtomicInteger(0);
+
+        try {
+            String cleaned = commentsJson.trim();
+            if (cleaned.startsWith("[")) cleaned = cleaned.substring(1);
+            if (cleaned.endsWith("]")) cleaned = cleaned.substring(0, cleaned.length() - 1);
+
+            String[] entries = cleaned.split("\\},\\s*\\{");
+
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Batch set comments");
+                try {
+                    Listing listing = program.getListing();
+
+                    for (String entry : entries) {
+                        entry = entry.replace("{", "").replace("}", "");
+                        String address = null;
+                        String comment = null;
+
+                        for (String pair : entry.split(",(?=\\s*\")")) {
+                            pair = pair.trim();
+                            if (pair.startsWith("\"address\"")) {
+                                address = pair.split(":")[1].trim().replace("\"", "");
+                            } else if (pair.startsWith("\"comment\"")) {
+                                int colonIdx = pair.indexOf(":");
+                                if (colonIdx >= 0) {
+                                    comment = pair.substring(colonIdx + 1).trim().replace("\"", "");
+                                }
+                            }
+                        }
+
+                        if (address != null && comment != null) {
+                            try {
+                                Address addr = program.getAddressFactory().getAddress(address);
+                                listing.setComment(addr, CodeUnit.PRE_COMMENT, comment);
+                                successCount.incrementAndGet();
+                            } catch (Exception e) {
+                                failCount.incrementAndGet();
+                            }
+                        }
+                    }
+                } finally {
+                    program.endTransaction(tx, successCount.get() > 0);
+                }
+            });
+        } catch (Exception e) {
+            return "Error processing batch comments: " + e.getMessage();
+        }
+
+        return String.format("Batch comments complete: %d succeeded, %d failed",
+            successCount.get(), failCount.get());
+    }
+
+    // =============================================================================
+    // EXPORT METHODS
+    // =============================================================================
+
+    /**
+     * Export structures as C header definitions
+     */
+    private String exportStructuresAsC(String namesParam) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+
+        DataTypeManager dtm = program.getDataTypeManager();
+        StringBuilder sb = new StringBuilder();
+        sb.append("/* Exported structures from Ghidra */\n\n");
+
+        List<String> targetNames = new ArrayList<>();
+        if (namesParam != null && !namesParam.isEmpty()) {
+            for (String name : namesParam.split(",")) {
+                targetNames.add(name.trim());
+            }
+        }
+
+        Iterator<DataType> typeIter = dtm.getAllDataTypes();
+        while (typeIter.hasNext()) {
+            DataType dt = typeIter.next();
+            if (dt instanceof ghidra.program.model.data.Structure) {
+                ghidra.program.model.data.Structure struct =
+                    (ghidra.program.model.data.Structure) dt;
+
+                // Filter if names specified
+                if (!targetNames.isEmpty() && !targetNames.contains(struct.getName())) {
+                    continue;
+                }
+
+                sb.append(String.format("typedef struct %s {\n", struct.getName()));
+
+                for (ghidra.program.model.data.DataTypeComponent comp : struct.getComponents()) {
+                    String fieldType = comp.getDataType().getName();
+                    String fieldName = comp.getFieldName();
+                    if (fieldName == null || fieldName.isEmpty()) {
+                        fieldName = "field_0x" + Integer.toHexString(comp.getOffset());
+                    }
+                    String comment = comp.getComment();
+
+                    sb.append(String.format("    %-20s %s;", fieldType, fieldName));
+                    if (comment != null && !comment.isEmpty()) {
+                        sb.append("  // ").append(comment);
+                    }
+                    sb.append(String.format("  /* offset: 0x%x */\n", comp.getOffset()));
+                }
+
+                sb.append(String.format("} %s;  /* size: 0x%x */\n\n",
+                    struct.getName(), struct.getLength()));
+            }
+        }
+
+        return sb.toString();
+    }
+
+    /**
+     * Export enums as C definitions
+     */
+    private String exportEnumsAsC(String namesParam) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+
+        DataTypeManager dtm = program.getDataTypeManager();
+        StringBuilder sb = new StringBuilder();
+        sb.append("/* Exported enums from Ghidra */\n\n");
+
+        List<String> targetNames = new ArrayList<>();
+        if (namesParam != null && !namesParam.isEmpty()) {
+            for (String name : namesParam.split(",")) {
+                targetNames.add(name.trim());
+            }
+        }
+
+        Iterator<DataType> typeIter = dtm.getAllDataTypes();
+        while (typeIter.hasNext()) {
+            DataType dt = typeIter.next();
+            if (dt instanceof ghidra.program.model.data.Enum) {
+                ghidra.program.model.data.Enum enumType =
+                    (ghidra.program.model.data.Enum) dt;
+
+                if (!targetNames.isEmpty() && !targetNames.contains(enumType.getName())) {
+                    continue;
+                }
+
+                sb.append(String.format("typedef enum %s {\n", enumType.getName()));
+
+                String[] names = enumType.getNames();
+                for (int i = 0; i < names.length; i++) {
+                    String name = names[i];
+                    long value = enumType.getValue(name);
+                    sb.append(String.format("    %s = 0x%x", name, value));
+                    if (i < names.length - 1) sb.append(",");
+                    sb.append("\n");
+                }
+
+                sb.append(String.format("} %s;\n\n", enumType.getName()));
+            }
+        }
+
+        return sb.toString();
+    }
+
+    /**
+     * Export function signatures
+     */
+    private String exportFunctionSignatures(String addressesParam) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+
+        FunctionManager funcMgr = program.getFunctionManager();
+        StringBuilder sb = new StringBuilder();
+        sb.append("/* Exported function signatures from Ghidra */\n\n");
+
+        if (addressesParam != null && !addressesParam.isEmpty()) {
+            // Export specific addresses
+            for (String addrStr : addressesParam.split(",")) {
+                addrStr = addrStr.trim();
+                try {
+                    Address addr = program.getAddressFactory().getAddress(addrStr);
+                    Function func = funcMgr.getFunctionAt(addr);
+                    if (func == null) {
+                        func = funcMgr.getFunctionContaining(addr);
+                    }
+                    if (func != null) {
+                        sb.append(String.format("// @ %s\n", func.getEntryPoint()));
+                        sb.append(func.getSignature().getPrototypeString()).append(";\n\n");
+                    }
+                } catch (Exception e) {
+                    sb.append("// Error processing ").append(addrStr).append("\n");
+                }
+            }
+        } else {
+            // Export all named functions
+            FunctionIterator funcIter = funcMgr.getFunctions(true);
+            int count = 0;
+            while (funcIter.hasNext() && count < 500) {
+                Function func = funcIter.next();
+                if (!func.getName().startsWith("FUN_")) {
+                    sb.append(String.format("// @ %s\n", func.getEntryPoint()));
+                    sb.append(func.getSignature().getPrototypeString()).append(";\n\n");
+                    count++;
+                }
+            }
+        }
+
+        return sb.toString();
     }
 
     // =============================================================================
