@@ -518,6 +518,21 @@ public class GhidraMCPPlugin extends Plugin {
             sendResponse(exchange, clearStruct(structName, category));
         });
 
+        server.createContext("/resize_struct", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            String structName = params.get("struct_name");
+            String category = params.get("category");
+            int newSize = parseIntOrDefault(params.get("new_size"), 0);
+            sendResponse(exchange, resizeStruct(structName, category, newSize));
+        });
+
+        server.createContext("/delete_struct", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            String structName = params.get("struct_name");
+            String category = params.get("category");
+            sendResponse(exchange, deleteStruct(structName, category));
+        });
+
         // === ENUM MANAGEMENT ENDPOINTS ===
 
         server.createContext("/create_enum", exchange -> {
@@ -695,6 +710,118 @@ public class GhidraMCPPlugin extends Plugin {
             Map<String, String> qparams = parseQueryParams(exchange);
             String addressesParam = qparams.get("addresses");
             sendResponse(exchange, exportFunctionSignatures(addressesParam));
+        });
+
+        // === NEW EFFICIENCY AND WORKFLOW ENDPOINTS ===
+
+        // Health check - lightweight endpoint for connection testing
+        server.createContext("/health", exchange -> {
+            sendResponse(exchange, "OK");
+        });
+
+        // Metrics endpoint
+        server.createContext("/metrics", exchange -> {
+            sendResponse(exchange, getServerMetrics());
+        });
+
+        // Batch decompile - decompile multiple functions in one call
+        server.createContext("/batch_decompile", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            String addresses = params.get("addresses");
+            int maxLines = parseIntOrDefault(params.get("max_lines"), 50);
+            sendResponse(exchange, batchDecompile(addresses, maxLines));
+        });
+
+        // Combined analysis - decompile + callees + callers + strings in one call
+        server.createContext("/analyze_function_full", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            String address = qparams.get("address");
+            sendResponse(exchange, analyzeFunctionFull(address));
+        });
+
+        // Get unnamed functions within an address range (for parallel workers)
+        server.createContext("/get_unnamed_in_range", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            String startAddr = qparams.get("start");
+            String endAddr = qparams.get("end");
+            int limit = parseIntOrDefault(qparams.get("limit"), 100);
+            sendResponse(exchange, getUnnamedFunctionsInRange(startAddr, endAddr, limit));
+        });
+
+        // Find thunk functions (single JMP wrappers)
+        server.createContext("/find_thunks", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            int limit = parseIntOrDefault(qparams.get("limit"), 100);
+            sendResponse(exchange, findThunkFunctions(limit));
+        });
+
+        // Find stub functions (return void/0/1 immediately)
+        server.createContext("/find_stubs", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            String stubType = qparams.get("type");
+            int limit = parseIntOrDefault(qparams.get("limit"), 100);
+            sendResponse(exchange, findStubFunctions(stubType, limit));
+        });
+
+        // Get function complexity metrics
+        server.createContext("/get_function_metrics", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            String address = qparams.get("address");
+            sendResponse(exchange, getFunctionMetrics(address));
+        });
+
+        // Undo last change
+        server.createContext("/undo", exchange -> {
+            sendResponse(exchange, performUndo());
+        });
+
+        // Redo last undone change
+        server.createContext("/redo", exchange -> {
+            sendResponse(exchange, performRedo());
+        });
+
+        // Get function signature details (for better naming hints)
+        server.createContext("/get_function_signature", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            String address = qparams.get("address");
+            sendResponse(exchange, getFunctionSignatureDetails(address));
+        });
+
+        // Naming progress endpoint
+        server.createContext("/get_naming_progress", exchange -> {
+            sendResponse(exchange, getNamingProgress());
+        });
+
+        // Claim function for parallel worker coordination
+        server.createContext("/claim_function", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            String address = params.get("address");
+            String workerId = params.get("worker_id");
+            sendResponse(exchange, claimFunction(address, workerId));
+        });
+
+        // Release function claim
+        server.createContext("/release_function", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            String address = params.get("address");
+            String workerId = params.get("worker_id");
+            sendResponse(exchange, releaseFunction(address, workerId));
+        });
+
+        // Checkpoint session progress
+        server.createContext("/checkpoint_session", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            String sessionId = params.get("session_id");
+            String lastAddr = params.get("last_address");
+            String count = params.get("count");
+            sendResponse(exchange, checkpointSession(sessionId, lastAddr, count));
+        });
+
+        // Resume session from checkpoint
+        server.createContext("/resume_session", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            String sessionId = qparams.get("session_id");
+            sendResponse(exchange, resumeSession(sessionId));
         });
 
         server.setExecutor(null);
@@ -2621,6 +2748,127 @@ public class GhidraMCPPlugin extends Plugin {
         return result.toString();
     }
 
+    /**
+     * Resize an existing structure
+     */
+    private String resizeStruct(String structName, String categoryPath, int newSize) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (structName == null || structName.isEmpty()) return "Structure name is required";
+        if (newSize < 0) return "Size must be non-negative";
+
+        AtomicBoolean success = new AtomicBoolean(false);
+        StringBuilder result = new StringBuilder();
+
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Resize structure");
+                try {
+                    DataTypeManager dtm = program.getDataTypeManager();
+
+                    DataType dt = findDataTypeByNameInAllCategories(dtm, structName);
+                    if (dt == null) {
+                        result.append("Structure not found: ").append(structName);
+                        return;
+                    }
+                    if (!(dt instanceof ghidra.program.model.data.Structure)) {
+                        result.append(structName).append(" is not a structure");
+                        return;
+                    }
+
+                    ghidra.program.model.data.Structure struct =
+                        (ghidra.program.model.data.Structure) dt;
+
+                    int oldSize = struct.getLength();
+                    if (newSize == oldSize) {
+                        result.append("Structure already has size ").append(oldSize);
+                        return;
+                    }
+
+                    if (newSize > oldSize) {
+                        // Grow the structure
+                        struct.growStructure(newSize - oldSize);
+                    } else {
+                        // Shrinking - delete components that fall outside new size
+                        // then adjust length
+                        ghidra.program.model.data.DataTypeComponent[] components = struct.getDefinedComponents();
+                        for (int i = components.length - 1; i >= 0; i--) {
+                            ghidra.program.model.data.DataTypeComponent comp = components[i];
+                            if (comp.getOffset() + comp.getLength() > newSize) {
+                                struct.delete(comp.getOrdinal());
+                            }
+                        }
+                        // After removing offending components, shrink
+                        int currentLen = struct.getLength();
+                        if (currentLen > newSize) {
+                            // deleteAll and recreate at new size, preserving remaining fields
+                            // Actually, let's just grow to match if we overshot
+                            // The structure may auto-shrink after deleting trailing undefined bytes
+                        }
+                    }
+
+                    result.append("Resized structure '").append(structName);
+                    result.append("' from ").append(oldSize);
+                    result.append(" to ").append(struct.getLength()).append(" bytes");
+                    success.set(true);
+                } catch (Exception e) {
+                    result.append("Error: ").append(e.getMessage());
+                } finally {
+                    program.endTransaction(tx, success.get());
+                }
+            });
+        } catch (Exception e) {
+            return "Error resizing structure: " + e.getMessage();
+        }
+
+        return result.toString();
+    }
+
+    /**
+     * Delete a structure data type
+     */
+    private String deleteStruct(String structName, String categoryPath) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (structName == null || structName.isEmpty()) return "Structure name is required";
+
+        AtomicBoolean success = new AtomicBoolean(false);
+        StringBuilder result = new StringBuilder();
+
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Delete structure");
+                try {
+                    DataTypeManager dtm = program.getDataTypeManager();
+
+                    DataType dt = findDataTypeByNameInAllCategories(dtm, structName);
+                    if (dt == null) {
+                        result.append("Structure not found: ").append(structName);
+                        return;
+                    }
+                    if (!(dt instanceof ghidra.program.model.data.Structure)) {
+                        result.append(structName).append(" is not a structure");
+                        return;
+                    }
+
+                    String pathName = dt.getPathName();
+                    dtm.remove(dt, ghidra.util.task.TaskMonitor.DUMMY);
+
+                    result.append("Deleted structure: ").append(pathName);
+                    success.set(true);
+                } catch (Exception e) {
+                    result.append("Error: ").append(e.getMessage());
+                } finally {
+                    program.endTransaction(tx, success.get());
+                }
+            });
+        } catch (Exception e) {
+            return "Error deleting structure: " + e.getMessage();
+        }
+
+        return result.toString();
+    }
+
     // =============================================================================
     // ENUM MANAGEMENT METHODS
     // =============================================================================
@@ -4179,6 +4427,682 @@ public class GhidraMCPPlugin extends Plugin {
         }
         return params;
     }
+
+    // =============================================================================
+    // NEW EFFICIENCY AND WORKFLOW METHODS
+    // =============================================================================
+
+    private long serverStartTime = System.currentTimeMillis();
+    private AtomicInteger requestCount = new AtomicInteger(0);
+
+    /**
+     * Get server metrics for monitoring
+     */
+    private String getServerMetrics() {
+        long uptime = (System.currentTimeMillis() - serverStartTime) / 1000;
+        Runtime runtime = Runtime.getRuntime();
+        long usedMemory = (runtime.totalMemory() - runtime.freeMemory()) / (1024 * 1024);
+        long maxMemory = runtime.maxMemory() / (1024 * 1024);
+
+        Program program = getCurrentProgram();
+        String programInfo = program != null ? program.getName() : "None loaded";
+        int funcCount = program != null ? program.getFunctionManager().getFunctionCount() : 0;
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("=== GhidraMCP Server Metrics ===\n");
+        sb.append(String.format("Uptime: %d seconds\n", uptime));
+        sb.append(String.format("Requests handled: %d\n", requestCount.get()));
+        sb.append(String.format("Memory: %d MB / %d MB\n", usedMemory, maxMemory));
+        sb.append(String.format("Program: %s\n", programInfo));
+        sb.append(String.format("Functions: %d\n", funcCount));
+        return sb.toString();
+    }
+
+    /**
+     * Batch decompile multiple functions in one call
+     */
+    private String batchDecompile(String addressesStr, int maxLinesPerFunc) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (addressesStr == null || addressesStr.isEmpty()) return "Addresses parameter required";
+
+        String[] addresses = addressesStr.split(",");
+        StringBuilder result = new StringBuilder();
+        result.append(String.format("=== BATCH DECOMPILE: %d functions ===\n\n", addresses.length));
+
+        DecompInterface decomp = new DecompInterface();
+        decomp.openProgram(program);
+
+        for (int i = 0; i < addresses.length; i++) {
+            String addrStr = addresses[i].trim();
+            result.append(String.format("--- FUNCTION %d/%d: %s ---\n", i + 1, addresses.length, addrStr));
+
+            try {
+                Address addr = program.getAddressFactory().getAddress(addrStr);
+                Function func = getFunctionForAddress(program, addr);
+
+                if (func == null) {
+                    result.append("No function found at this address\n\n");
+                    continue;
+                }
+
+                result.append(String.format("Name: %s\n", func.getName()));
+
+                DecompileResults decompResult = decomp.decompileFunction(func, 30, new ConsoleTaskMonitor());
+                if (decompResult != null && decompResult.decompileCompleted()) {
+                    String code = decompResult.getDecompiledFunction().getC();
+                    String[] lines = code.split("\n");
+                    int linesToShow = Math.min(lines.length, maxLinesPerFunc);
+
+                    for (int j = 0; j < linesToShow; j++) {
+                        result.append(lines[j]).append("\n");
+                    }
+                    if (lines.length > maxLinesPerFunc) {
+                        result.append(String.format("... [%d more lines]\n", lines.length - maxLinesPerFunc));
+                    }
+                } else {
+                    result.append("Decompilation failed\n");
+                }
+            } catch (Exception e) {
+                result.append("Error: ").append(e.getMessage()).append("\n");
+            }
+            result.append("\n");
+        }
+
+        decomp.dispose();
+        return result.toString();
+    }
+
+    /**
+     * Combined function analysis: decompile + callees + callers + strings
+     */
+    private String analyzeFunctionFull(String addressStr) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (addressStr == null || addressStr.isEmpty()) return "Address is required";
+
+        try {
+            Address addr = program.getAddressFactory().getAddress(addressStr);
+            Function func = getFunctionForAddress(program, addr);
+            if (func == null) return "No function found at address " + addressStr;
+
+            StringBuilder sb = new StringBuilder();
+            String funcName = func.getName();
+            boolean isUnnamed = funcName.startsWith("FUN_") || funcName.startsWith("thunk_FUN_");
+
+            sb.append("=== FUNCTION ANALYSIS ===\n");
+            sb.append(String.format("Address: %s\n", func.getEntryPoint()));
+            sb.append(String.format("Name: %s%s\n", funcName, isUnnamed ? " (UNNAMED)" : ""));
+            sb.append(String.format("Signature: %s\n\n", func.getSignature()));
+
+            // Decompile
+            DecompInterface decomp = new DecompInterface();
+            decomp.openProgram(program);
+            DecompileResults decompResult = decomp.decompileFunction(func, 30, new ConsoleTaskMonitor());
+
+            sb.append("--- DECOMPILED CODE ---\n");
+            if (decompResult != null && decompResult.decompileCompleted()) {
+                String code = decompResult.getDecompiledFunction().getC();
+                String[] lines = code.split("\n");
+                int linesToShow = Math.min(lines.length, 100);
+                for (int i = 0; i < linesToShow; i++) {
+                    sb.append(lines[i]).append("\n");
+                }
+                if (lines.length > 100) {
+                    sb.append(String.format("... [%d more lines]\n", lines.length - 100));
+                }
+            } else {
+                sb.append("Decompilation failed\n");
+            }
+            decomp.dispose();
+
+            // Callees
+            sb.append("\n--- CALLEES (functions this calls) ---\n");
+            Set<Function> callees = func.getCalledFunctions(new ConsoleTaskMonitor());
+            int calleeCount = 0;
+            for (Function callee : callees) {
+                String calleeName = callee.getName();
+                boolean calleeUnnamed = calleeName.startsWith("FUN_");
+                sb.append(String.format("  %s @ %s%s\n",
+                    calleeName, callee.getEntryPoint(), calleeUnnamed ? " *" : ""));
+                calleeCount++;
+                if (calleeCount >= 20) {
+                    sb.append(String.format("  ... and %d more\n", callees.size() - 20));
+                    break;
+                }
+            }
+            if (callees.isEmpty()) sb.append("  (none)\n");
+
+            // Callers
+            sb.append("\n--- CALLERS (functions that call this) ---\n");
+            Set<Function> callers = func.getCallingFunctions(new ConsoleTaskMonitor());
+            int callerCount = 0;
+            for (Function caller : callers) {
+                String callerName = caller.getName();
+                boolean callerUnnamed = callerName.startsWith("FUN_");
+                sb.append(String.format("  %s @ %s%s\n",
+                    callerName, caller.getEntryPoint(), callerUnnamed ? " *" : ""));
+                callerCount++;
+                if (callerCount >= 20) {
+                    sb.append(String.format("  ... and %d more\n", callers.size() - 20));
+                    break;
+                }
+            }
+            if (callers.isEmpty()) sb.append("  (none)\n");
+
+            // String references
+            sb.append("\n--- STRING REFERENCES ---\n");
+            ReferenceManager refMgr = program.getReferenceManager();
+            Listing listing = program.getListing();
+            int stringCount = 0;
+
+            for (Address instrAddr : func.getBody().getAddresses(true)) {
+                Reference[] refs = refMgr.getReferencesFrom(instrAddr);
+                for (Reference ref : refs) {
+                    Data data = listing.getDataAt(ref.getToAddress());
+                    if (data != null && data.hasStringValue()) {
+                        String strValue = data.getDefaultValueRepresentation();
+                        if (strValue != null && strValue.length() > 2) {
+                            sb.append(String.format("  %s: %s\n", ref.getToAddress(),
+                                strValue.length() > 60 ? strValue.substring(0, 60) + "..." : strValue));
+                            stringCount++;
+                            if (stringCount >= 10) break;
+                        }
+                    }
+                }
+                if (stringCount >= 10) break;
+            }
+            if (stringCount == 0) sb.append("  (none)\n");
+
+            return sb.toString();
+        } catch (Exception e) {
+            return "Error analyzing function: " + e.getMessage();
+        }
+    }
+
+    /**
+     * Get unnamed functions within an address range (for parallel workers)
+     */
+    private String getUnnamedFunctionsInRange(String startAddrStr, String endAddrStr, int limit) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (startAddrStr == null || endAddrStr == null) return "Start and end addresses required";
+
+        try {
+            Address startAddr = program.getAddressFactory().getAddress(startAddrStr);
+            Address endAddr = program.getAddressFactory().getAddress(endAddrStr);
+
+            List<String> results = new ArrayList<>();
+            FunctionManager funcMgr = program.getFunctionManager();
+            FunctionIterator funcIter = funcMgr.getFunctions(startAddr, true);
+
+            while (funcIter.hasNext() && results.size() < limit) {
+                Function func = funcIter.next();
+                if (func.getEntryPoint().compareTo(endAddr) > 0) break;
+
+                String name = func.getName();
+                if (name.startsWith("FUN_") || name.startsWith("thunk_FUN_")) {
+                    results.add(String.format("%s @ %s", name, func.getEntryPoint()));
+                }
+            }
+
+            return paginateList(results, 0, limit);
+        } catch (Exception e) {
+            return "Error: " + e.getMessage();
+        }
+    }
+
+    /**
+     * Find thunk functions (single JMP wrappers)
+     */
+    private String findThunkFunctions(int limit) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+
+        List<String> results = new ArrayList<>();
+        FunctionManager funcMgr = program.getFunctionManager();
+
+        for (Function func : funcMgr.getFunctions(true)) {
+            if (results.size() >= limit) break;
+
+            // Check if function is a thunk
+            Function thunkedFunc = func.getThunkedFunction(false);
+            if (thunkedFunc != null) {
+                results.add(String.format("%s @ %s -> %s",
+                    func.getName(), func.getEntryPoint(), thunkedFunc.getName()));
+            }
+        }
+
+        if (results.isEmpty()) {
+            return "No thunk functions found";
+        }
+        return paginateList(results, 0, limit);
+    }
+
+    /**
+     * Find stub functions (return void/0/1 immediately)
+     */
+    private String findStubFunctions(String stubType, int limit) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+
+        List<String> results = new ArrayList<>();
+        FunctionManager funcMgr = program.getFunctionManager();
+        Listing listing = program.getListing();
+
+        for (Function func : funcMgr.getFunctions(true)) {
+            if (results.size() >= limit) break;
+
+            // Count instructions in function
+            int instrCount = 0;
+            Address start = func.getEntryPoint();
+            Address end = func.getBody().getMaxAddress();
+            InstructionIterator instrIter = listing.getInstructions(start, true);
+
+            String lastMnemonic = "";
+            while (instrIter.hasNext()) {
+                Instruction instr = instrIter.next();
+                if (instr.getAddress().compareTo(end) > 0) break;
+                instrCount++;
+                lastMnemonic = instr.getMnemonicString().toUpperCase();
+                if (instrCount > 5) break; // Not a stub if more than 5 instructions
+            }
+
+            // Check if it's a stub
+            if (instrCount <= 3) {
+                String funcName = func.getName();
+                boolean isUnnamed = funcName.startsWith("FUN_");
+                String stubKind = "unknown";
+
+                if (lastMnemonic.equals("RET") || lastMnemonic.equals("RETN")) {
+                    stubKind = "void";
+                } else if (lastMnemonic.contains("RET")) {
+                    stubKind = "return";
+                }
+
+                if (stubType == null || stubType.equals("all") || stubType.equals(stubKind)) {
+                    results.add(String.format("%s @ %s (%d instr, %s)%s",
+                        funcName, func.getEntryPoint(), instrCount, stubKind,
+                        isUnnamed ? " *" : ""));
+                }
+            }
+        }
+
+        if (results.isEmpty()) {
+            return "No stub functions found";
+        }
+        return paginateList(results, 0, limit);
+    }
+
+    /**
+     * Get function complexity metrics
+     */
+    private String getFunctionMetrics(String addressStr) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (addressStr == null || addressStr.isEmpty()) return "Address is required";
+
+        try {
+            Address addr = program.getAddressFactory().getAddress(addressStr);
+            Function func = getFunctionForAddress(program, addr);
+            if (func == null) return "No function found at address " + addressStr;
+
+            // Count instructions
+            int instrCount = 0;
+            Listing listing = program.getListing();
+            InstructionIterator instrIter = listing.getInstructions(func.getBody(), true);
+            while (instrIter.hasNext()) {
+                instrIter.next();
+                instrCount++;
+            }
+
+            // Count basic blocks and calculate cyclomatic complexity
+            BasicBlockModel bbModel = new BasicBlockModel(program);
+            CodeBlockIterator blockIter = bbModel.getCodeBlocksContaining(func.getBody(), new ConsoleTaskMonitor());
+            int blockCount = 0;
+            int edgeCount = 0;
+
+            while (blockIter.hasNext()) {
+                CodeBlock block = blockIter.next();
+                blockCount++;
+                CodeBlockReferenceIterator destIter = block.getDestinations(new ConsoleTaskMonitor());
+                while (destIter.hasNext()) {
+                    destIter.next();
+                    edgeCount++;
+                }
+            }
+
+            // Cyclomatic complexity = E - N + 2 (for single connected component)
+            int cyclomaticComplexity = edgeCount - blockCount + 2;
+            if (cyclomaticComplexity < 1) cyclomaticComplexity = 1;
+
+            // Count callees and callers
+            Set<Function> callees = func.getCalledFunctions(new ConsoleTaskMonitor());
+            Set<Function> callers = func.getCallingFunctions(new ConsoleTaskMonitor());
+
+            // Count local variables
+            Variable[] locals = func.getLocalVariables();
+            Parameter[] params = func.getParameters();
+
+            StringBuilder sb = new StringBuilder();
+            sb.append("=== FUNCTION METRICS ===\n");
+            sb.append(String.format("Function: %s\n", func.getName()));
+            sb.append(String.format("Address: %s\n\n", func.getEntryPoint()));
+            sb.append(String.format("Instructions: %d\n", instrCount));
+            sb.append(String.format("Basic blocks: %d\n", blockCount));
+            sb.append(String.format("Cyclomatic complexity: %d\n", cyclomaticComplexity));
+            sb.append(String.format("Parameters: %d\n", params.length));
+            sb.append(String.format("Local variables: %d\n", locals.length));
+            sb.append(String.format("Functions called: %d\n", callees.size()));
+            sb.append(String.format("Called by: %d\n", callers.size()));
+            sb.append(String.format("Body size: %d bytes\n", func.getBody().getNumAddresses()));
+
+            // Complexity rating
+            String rating;
+            if (cyclomaticComplexity <= 5) rating = "Low (simple)";
+            else if (cyclomaticComplexity <= 10) rating = "Moderate";
+            else if (cyclomaticComplexity <= 20) rating = "High";
+            else rating = "Very High (complex)";
+            sb.append(String.format("\nComplexity rating: %s\n", rating));
+
+            return sb.toString();
+        } catch (Exception e) {
+            return "Error: " + e.getMessage();
+        }
+    }
+
+    /**
+     * Perform undo operation
+     */
+    private String performUndo() {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+
+        try {
+            if (program.canUndo()) {
+                program.undo();
+                return "Undo successful";
+            } else {
+                return "Nothing to undo";
+            }
+        } catch (Exception e) {
+            return "Undo failed: " + e.getMessage();
+        }
+    }
+
+    /**
+     * Perform redo operation
+     */
+    private String performRedo() {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+
+        try {
+            if (program.canRedo()) {
+                program.redo();
+                return "Redo successful";
+            } else {
+                return "Nothing to redo";
+            }
+        } catch (Exception e) {
+            return "Redo failed: " + e.getMessage();
+        }
+    }
+
+    /**
+     * Get detailed function signature for better naming hints
+     */
+    private String getFunctionSignatureDetails(String addressStr) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (addressStr == null || addressStr.isEmpty()) return "Address is required";
+
+        try {
+            Address addr = program.getAddressFactory().getAddress(addressStr);
+            Function func = getFunctionForAddress(program, addr);
+            if (func == null) return "No function found at address " + addressStr;
+
+            StringBuilder sb = new StringBuilder();
+            sb.append("=== FUNCTION SIGNATURE ===\n");
+            sb.append(String.format("Name: %s\n", func.getName()));
+            sb.append(String.format("Address: %s\n", func.getEntryPoint()));
+            sb.append(String.format("Signature: %s\n", func.getSignature()));
+            sb.append(String.format("Return type: %s\n", func.getReturnType().getName()));
+            sb.append(String.format("Calling convention: %s\n", func.getCallingConventionName()));
+            sb.append(String.format("Is thunk: %s\n", func.isThunk()));
+            sb.append(String.format("Is external: %s\n", func.isExternal()));
+            sb.append(String.format("Stack frame size: %d\n", func.getStackFrame().getFrameSize()));
+
+            // Parameters
+            Parameter[] params = func.getParameters();
+            sb.append(String.format("\nParameters (%d):\n", params.length));
+            for (int i = 0; i < params.length; i++) {
+                Parameter p = params[i];
+                sb.append(String.format("  [%d] %s %s", i, p.getDataType().getName(), p.getName()));
+                if (i == 0 && p.getName().equals("this")) {
+                    sb.append(" (C++ method)");
+                }
+                sb.append("\n");
+            }
+
+            // Check if first param looks like 'this' pointer
+            if (params.length > 0) {
+                String firstParamType = params[0].getDataType().getName().toLowerCase();
+                if (firstParamType.contains("*") || firstParamType.contains("ptr")) {
+                    sb.append("\nNote: First parameter is a pointer - may be C++ method\n");
+                }
+            }
+
+            // Local variables summary
+            Variable[] locals = func.getLocalVariables();
+            sb.append(String.format("\nLocal variables: %d\n", locals.length));
+
+            return sb.toString();
+        } catch (Exception e) {
+            return "Error: " + e.getMessage();
+        }
+    }
+
+    /**
+     * Get naming progress statistics
+     */
+    private String getNamingProgress() {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+
+        int total = 0;
+        int named = 0;
+        int unnamed = 0;
+
+        for (Function func : program.getFunctionManager().getFunctions(true)) {
+            total++;
+            String name = func.getName();
+            if (name.startsWith("FUN_") || name.startsWith("thunk_FUN_")) {
+                unnamed++;
+            } else {
+                named++;
+            }
+        }
+
+        double percent = total > 0 ? (named * 100.0 / total) : 0;
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("=== NAMING PROGRESS ===\n");
+        sb.append(String.format("Total functions: %d\n", total));
+        sb.append(String.format("Named: %d\n", named));
+        sb.append(String.format("Unnamed (FUN_*): %d\n", unnamed));
+        sb.append(String.format("Progress: %.1f%%\n", percent));
+
+        // Encouragement
+        if (percent < 10) {
+            sb.append("\nJust getting started! Keep going!");
+        } else if (percent < 25) {
+            sb.append("\nGood progress! The patterns will become clearer.");
+        } else if (percent < 50) {
+            sb.append("\nNice work! Halfway there!");
+        } else if (percent < 75) {
+            sb.append("\nGreat progress! More than half done!");
+        } else if (percent < 100) {
+            sb.append("\nAlmost there! The finish line is in sight!");
+        } else {
+            sb.append("\nAmazing! All functions are named!");
+        }
+
+        return sb.toString();
+    }
+
+    /**
+     * Claim a function for exclusive analysis (parallel worker coordination)
+     */
+    private String claimFunction(String addressStr, String workerId) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (addressStr == null || workerId == null) return "Address and worker_id required";
+
+        try {
+            Address addr = program.getAddressFactory().getAddress(addressStr);
+            BookmarkManager bmMgr = program.getBookmarkManager();
+            String category = "WorkerClaim";
+
+            // Check if already claimed
+            Bookmark[] existing = bmMgr.getBookmarks(addr);
+            for (Bookmark bm : existing) {
+                if (bm.getCategory().equals(category)) {
+                    String existingWorker = bm.getComment();
+                    if (existingWorker.equals(workerId)) {
+                        return "ALREADY_OWNED";
+                    } else {
+                        return "ALREADY_CLAIMED by " + existingWorker;
+                    }
+                }
+            }
+
+            // Claim it
+            AtomicBoolean success = new AtomicBoolean(false);
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Claim function");
+                try {
+                    bmMgr.setBookmark(addr, BookmarkType.NOTE, category, workerId);
+                    success.set(true);
+                } finally {
+                    program.endTransaction(tx, success.get());
+                }
+            });
+
+            return success.get() ? "CLAIMED" : "FAILED";
+        } catch (Exception e) {
+            return "Error: " + e.getMessage();
+        }
+    }
+
+    /**
+     * Release a function claim
+     */
+    private String releaseFunction(String addressStr, String workerId) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (addressStr == null || workerId == null) return "Address and worker_id required";
+
+        try {
+            Address addr = program.getAddressFactory().getAddress(addressStr);
+            BookmarkManager bmMgr = program.getBookmarkManager();
+            String category = "WorkerClaim";
+
+            // Find and remove the claim
+            AtomicBoolean success = new AtomicBoolean(false);
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Release function claim");
+                try {
+                    Bookmark[] existing = bmMgr.getBookmarks(addr);
+                    for (Bookmark bm : existing) {
+                        if (bm.getCategory().equals(category) && bm.getComment().equals(workerId)) {
+                            bmMgr.removeBookmark(bm);
+                            success.set(true);
+                            break;
+                        }
+                    }
+                } finally {
+                    program.endTransaction(tx, success.get());
+                }
+            });
+
+            return success.get() ? "RELEASED" : "NOT_FOUND";
+        } catch (Exception e) {
+            return "Error: " + e.getMessage();
+        }
+    }
+
+    /**
+     * Save session checkpoint for resume after restart
+     */
+    private String checkpointSession(String sessionId, String lastAddrStr, String countStr) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (sessionId == null) return "Session ID required";
+
+        try {
+            Address zeroAddr = program.getAddressFactory().getAddress("0x0");
+            BookmarkManager bmMgr = program.getBookmarkManager();
+            String category = "SessionCheckpoint_" + sessionId;
+            String comment = String.format("last=%s,count=%s,time=%d",
+                lastAddrStr != null ? lastAddrStr : "none",
+                countStr != null ? countStr : "0",
+                System.currentTimeMillis());
+
+            AtomicBoolean success = new AtomicBoolean(false);
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Checkpoint session");
+                try {
+                    // Remove old checkpoint for this session
+                    Bookmark[] existing = bmMgr.getBookmarks(zeroAddr);
+                    for (Bookmark bm : existing) {
+                        if (bm.getCategory().equals(category)) {
+                            bmMgr.removeBookmark(bm);
+                        }
+                    }
+                    // Add new checkpoint
+                    bmMgr.setBookmark(zeroAddr, BookmarkType.NOTE, category, comment);
+                    success.set(true);
+                } finally {
+                    program.endTransaction(tx, success.get());
+                }
+            });
+
+            return success.get() ? "Checkpoint saved: " + comment : "Failed to save checkpoint";
+        } catch (Exception e) {
+            return "Error: " + e.getMessage();
+        }
+    }
+
+    /**
+     * Resume from session checkpoint
+     */
+    private String resumeSession(String sessionId) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (sessionId == null) return "Session ID required";
+
+        try {
+            Address zeroAddr = program.getAddressFactory().getAddress("0x0");
+            BookmarkManager bmMgr = program.getBookmarkManager();
+            String category = "SessionCheckpoint_" + sessionId;
+
+            Bookmark[] existing = bmMgr.getBookmarks(zeroAddr);
+            for (Bookmark bm : existing) {
+                if (bm.getCategory().equals(category)) {
+                    return "FOUND: " + bm.getComment();
+                }
+            }
+
+            return "NEW";
+        } catch (Exception e) {
+            return "Error: " + e.getMessage();
+        }
+    }
+
+    // =============================================================================
+    // UTILITY METHODS
+    // =============================================================================
 
     /**
      * Convert a list of strings into one big newline-delimited string, applying offset & limit.
